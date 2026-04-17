@@ -13,7 +13,7 @@ AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
 # Bedrock model IDs (EU inference profiles)
-BEDROCK_MODEL_ID: str = "eu.anthropic.claude-sonnet-4-5-20251001"
+BEDROCK_MODEL_ID: str = "eu.anthropic.claude-sonnet-4-6"
 EMBEDDINGS_MODEL_ID: str = "amazon.titan-embed-text-v2:0"
 
 # Database

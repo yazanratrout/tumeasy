@@ -1,7 +1,9 @@
 .venv/*
+venv/
 .env
 .DS_Store
 tum_pulse/data/
 *.db
 *.png
 __pycache__/
+*.egg-info/
