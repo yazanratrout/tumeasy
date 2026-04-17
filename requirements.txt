@@ -1,0 +1,17 @@
+boto3
+python-dotenv
+pandas
+langchain-aws
+langchain-text-splitters
+lxml
+beautifulsoup4
+langchain
+langgraph
+streamlit
+playwright
+pymupdf
+numpy
+requests
+aiohttp
+python-dateutil
+pydantic
