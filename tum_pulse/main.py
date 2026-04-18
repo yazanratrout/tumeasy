@@ -59,7 +59,7 @@ html, body, [data-testid="stAppViewContainer"] {{
 }}
 
 /* ── Top header bar ── */
-[data-testid="stHeader"] {{ background: {TUM_DARK_BLUE}; }}
+[data-testid="stHeader"] {{ background: {TUM_BG}; }}
 
 /* ── Tab bar ── */
 .stTabs [data-baseweb="tab-list"] {{
@@ -482,9 +482,7 @@ with st.sidebar:
     _name_saved = _db.get_profile("name") or ""
     student_name = st.text_input("Your Name", value=_name_saved, placeholder="Max Mustermann")
 
-    st.markdown(f"<div style='opacity:0.7;font-size:0.78rem;margin-top:-8px'>Logged in as <b>{st.session_state.tum_username}</b></div>", unsafe_allow_html=True)
-
-    st.divider()
+    st.markdown(f"<div style='opacity:0.7;font-size:0.78rem;margin-top:-8px;margin-bottom:12px'>Logged in as <b>{st.session_state.tum_username}</b></div>", unsafe_allow_html=True)
 
     _saved_courses = _db.get_profile("courses") or []
     _saved_grades = _db.get_profile("grades") or {}
