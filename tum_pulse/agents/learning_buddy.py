@@ -14,6 +14,46 @@ from tum_pulse.tools.bedrock_client import BedrockClient
 from tum_pulse.tools.moodle_scraper import MoodleScraper as _MoodleScraper
 
 
+def _default_context() -> dict:
+    """Return a safe default context dict for when no profile is available."""
+    return {"grades": {}, "courses": [], "weak_subjects": [], "timeline_days": 28}
+
+
+def _infer_weak_subjects(grades: dict) -> list[str]:
+    """Return course names where grade is poor (> 2.5 in German grading system)."""
+    weak = []
+    for course, grade in grades.items():
+        try:
+            if float(grade) > 2.5:
+                weak.append(course)
+        except (ValueError, TypeError):
+            pass
+    return weak
+
+
+def _extract_timeline(user_input: str) -> int:
+    """Parse natural language time expressions and return number of study days.
+
+    Handles patterns like '3 days', '2 weeks', '1 month', 'a month'.
+    Defaults to 28 days (4 weeks) if no pattern is found.
+    """
+    text = user_input.lower()
+
+    # Match "<n> days/weeks/months" or "a day/week/month"
+    m = re.search(r"(\d+|a|an)\s+(day|week|month)s?", text)
+    if m:
+        qty_str, unit = m.group(1), m.group(2)
+        qty = 1 if qty_str in ("a", "an") else int(qty_str)
+        if unit == "day":
+            return max(1, qty)
+        if unit == "week":
+            return qty * 7
+        if unit == "month":
+            return qty * 30
+
+    return 28  # default: 4 weeks
+
+
 class LearningBuddyAgent:
     """Builds personalised study plans by analysing past exam papers and lectures."""
 
@@ -543,7 +583,7 @@ class LearningBuddyAgent:
     # ------------------------------------------------------------------
 
     def analyse_past_papers(
-        self, past_paper_text: str, lecture_texts: dict[str, str]
+        self, past_paper_text: str, lecture_texts: dict[str, str], context: dict | None = None
     ) -> dict:
         """Use Claude to identify and prioritise exam topics.
 
@@ -569,8 +609,15 @@ class LearningBuddyAgent:
             f"--- {name} ---\n{text[:500]}" for name, text in lecture_texts.items()
         )
 
-        prompt = f"""You are an expert exam analyst. Analyse the following past exam papers and lecture notes.
+        ctx = context or {}
+        weak_subjects = ctx.get("weak_subjects") or _infer_weak_subjects(ctx.get("grades", {}))
+        weak_hint = (
+            f"\nSTUDENT WEAK AREAS (prioritise these topics): {', '.join(weak_subjects)}\n"
+            if weak_subjects else ""
+        )
 
+        prompt = f"""You are an expert exam analyst. Analyse the following past exam papers and lecture notes.
+{weak_hint}
 PAST EXAM PAPERS:
 {past_paper_text[:3000]}
 
@@ -617,24 +664,41 @@ Identify ALL distinct topics. Order by priority_score descending. Return ONLY va
     # Study plan generation
     # ------------------------------------------------------------------
 
-    def generate_study_plan(self, analysis: dict, course_name: str) -> str:
-        """Generate a week-by-week study plan from topic analysis.
+    def generate_study_plan(
+        self,
+        analysis: dict,
+        course_name: str,
+        context: dict | None = None,
+        timeline_days: int = 28,
+    ) -> str:
+        """Generate an adaptive study plan from topic analysis.
 
         Args:
             analysis: Output of analyse_past_papers().
             course_name: Name of the course for contextualisation.
+            context: Optional student profile context dict.
+            timeline_days: Total days available to study.
 
         Returns:
             Formatted markdown study plan.
         """
         topics_json = json.dumps(analysis, indent=2)
 
-        prompt = f"""You are an expert academic tutor helping a TUM student prepare for their {course_name} exam.
+        weeks = max(1, timeline_days // 7)
+        ctx = context or {}
+        weak_subjects = ctx.get("weak_subjects") or _infer_weak_subjects(ctx.get("grades", {}))
+        weak_hint = (
+            f"\nThe student has struggled with: {', '.join(weak_subjects)}. "
+            "Allocate extra time for these areas.\n"
+            if weak_subjects else ""
+        )
 
+        prompt = f"""You are an expert academic tutor helping a TUM student prepare for their {course_name} exam.
+{weak_hint}
 Based on this topic analysis from past papers:
 {topics_json}
 
-Create a concise, realistic week-by-week study plan for 4 weeks before the exam.
+Create a concise, realistic study plan for {weeks} week(s) ({timeline_days} days) before the exam.
 - Prioritise topics by priority_score (highest first)
 - Each week should have 3-4 specific study goals
 - Include one practice/revision day per week
@@ -649,17 +713,25 @@ Format as clean markdown with ## Week headers."""
     # Agent entry point
     # ------------------------------------------------------------------
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str, context: dict | None = None) -> str:
         """Orchestrate the full exam planning pipeline.
 
         Args:
             user_input: Natural language request, e.g. "Help me prepare for Analysis 2".
+            context: Optional student profile context dict from orchestrator.
 
         Returns:
             Formatted markdown study plan.
         """
+        ctx = context or _default_context()
+        timeline_days = _extract_timeline(user_input)
+
+        # Enrich context with inferred weak subjects if not already set
+        if "weak_subjects" not in ctx:
+            ctx["weak_subjects"] = _infer_weak_subjects(ctx.get("grades", {}))
+
         # Extract course name — check against known enrolled courses first
-        known_courses = self.db.get_profile("courses") or []
+        known_courses = self.db.get_profile("courses") or ctx.get("courses") or []
         course_name = None
 
         user_lower = user_input.lower()
@@ -711,10 +783,11 @@ Format as clean markdown with ## Week headers."""
             past_paper_text = "\n\n".join(past_papers.values()) if past_papers else "\n\n".join(list(texts.values())[:1])
             lecture_texts = lectures if lectures else texts
 
-            analysis = self.analyse_past_papers(past_paper_text, lecture_texts)
-            study_plan = self.generate_study_plan(analysis, course_name)
+            analysis = self.analyse_past_papers(past_paper_text, lecture_texts, context=ctx)
+            study_plan = self.generate_study_plan(analysis, course_name, context=ctx, timeline_days=timeline_days)
 
-            header = f"# Study Plan: {course_name}\n\n"
+            weeks = max(1, timeline_days // 7)
+            header = f"# Study Plan: {course_name} ({weeks} week{'s' if weeks != 1 else ''})\n\n"
             topic_summary = "## Top Priority Topics\n" + "\n".join(
                 f"- **{t['name']}** — priority {t['priority_score']:.2f} ({t['points_weight']:.0f}% of exam)"
                 for t in analysis.get("topics", [])[:5]

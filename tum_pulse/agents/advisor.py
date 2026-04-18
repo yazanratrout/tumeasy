@@ -406,6 +406,22 @@ def get_electives(db: "SQLiteMemory", force_refresh: bool = False) -> list[dict]
 
 
 # ---------------------------------------------------------------------------
+# Context helpers
+# ---------------------------------------------------------------------------
+
+def _infer_weak_subjects(grades: dict) -> list[str]:
+    """Return course names where the student's grade is poor (> 2.5 in German system)."""
+    weak = []
+    for course, grade in grades.items():
+        try:
+            if float(grade) > 2.5:
+                weak.append(course)
+        except (ValueError, TypeError):
+            pass
+    return weak
+
+
+# ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
 
@@ -538,21 +554,27 @@ class AdvisorAgent:
     # Agent entry point
     # ------------------------------------------------------------------
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str, context: dict | None = None) -> str:
         """Extract profile from SQLite or message, return formatted recommendations.
 
         Args:
             user_input: Natural language request from the student.
+            context: Optional context dict with 'grades' and 'courses' from orchestrator.
 
         Returns:
             Formatted markdown string with top-5 elective recommendations.
         """
         profile: dict = {}
+        ctx = context or {}
 
         selected_grades = self.db.get_profile("selected_recommendation_grades") or {}
         selected_courses = self.db.get_profile("selected_recommendation_courses") or []
-        saved_grades = self.db.get_profile("grades")
-        saved_courses = self.db.get_profile("courses") or self.db.get_profile("enrolled")
+        saved_grades = self.db.get_profile("grades") or ctx.get("grades") or {}
+        saved_courses = (
+            self.db.get_profile("courses") or
+            self.db.get_profile("enrolled") or
+            ctx.get("courses") or []
+        )
 
         # If no profile at all, trigger a fresh course+grade fetch
         if not saved_grades and not saved_courses:
@@ -571,7 +593,7 @@ class AdvisorAgent:
             except Exception as exc:
                 print(f"[AdvisorAgent] Fresh fetch failed: {exc}")
 
-        active_grades = selected_grades if selected_courses else (saved_grades or {})
+        active_grades = selected_grades if selected_grades else (saved_grades or {})
         active_courses = selected_courses if selected_courses else (saved_courses or [])
 
         if active_grades:
@@ -584,6 +606,11 @@ class AdvisorAgent:
                 "grades": {"Linear Algebra": 1.7, "Analysis": 2.3, "Algorithms and Data Structures": 2.0},
                 "courses": ["Introduction to Programming", "Linear Algebra", "Analysis"],
             }
+
+        # Context-aware: boost electives that align with weak areas so student can improve
+        weak_subjects = _infer_weak_subjects(profile.get("grades", {}))
+        if weak_subjects:
+            print(f"[AdvisorAgent] Weak subjects detected: {weak_subjects} — will surface strengthening electives")
 
         try:
             recommendations = self.recommend(profile)
@@ -600,7 +627,11 @@ class AdvisorAgent:
             if selected_courses
             else "_(No specific courses selected, so recommendations use your full saved course history.)_\n\n"
         )
-        lines = ["**Elective Course Recommendations for You:**\n\n" + source_note + selection_note]
+        weak_note = (
+            f"_(Subjects where you may benefit from extra practice: {', '.join(weak_subjects)})_\n\n"
+            if weak_subjects else ""
+        )
+        lines = ["**Elective Course Recommendations for You:**\n\n" + source_note + selection_note + weak_note]
 
         for i, rec in enumerate(recommendations, 1):
             el = rec["elective"]

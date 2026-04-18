@@ -9,6 +9,7 @@ from tum_pulse.agents.advisor import AdvisorAgent
 from tum_pulse.agents.executor import ExecutorAgent
 from tum_pulse.agents.learning_buddy import LearningBuddyAgent
 from tum_pulse.agents.watcher import WatcherAgent
+from tum_pulse.memory.database import SQLiteMemory
 from tum_pulse.tools.bedrock_client import BedrockClient
 
 
@@ -23,6 +24,7 @@ class OrchestratorState(TypedDict):
     user_input: str
     agent_called: str
     response: str
+    context: dict
 
 
 # ---------------------------------------------------------------------------
@@ -54,15 +56,27 @@ def _classify_intent(user_input: str, bedrock: BedrockClient) -> str:
     return "general"
 
 
+def _build_context() -> dict:
+    """Load student profile from SQLite to build a context dict for agents."""
+    try:
+        db = SQLiteMemory()
+        grades = db.get_profile("grades") or {}
+        courses = db.get_profile("courses") or db.get_profile("enrolled") or []
+        return {"grades": grades, "courses": courses}
+    except Exception:
+        return {"grades": {}, "courses": []}
+
+
 # ---------------------------------------------------------------------------
 # Graph nodes
 # ---------------------------------------------------------------------------
 
 def router_node(state: OrchestratorState) -> OrchestratorState:
-    """Classify intent and store the routing decision in state."""
+    """Classify intent and store the routing decision and context in state."""
     bedrock = BedrockClient()
     intent = _classify_intent(state["user_input"], bedrock)
-    return {**state, "agent_called": intent}
+    context = _build_context()
+    return {**state, "agent_called": intent, "context": context}
 
 
 def watcher_node(state: OrchestratorState) -> OrchestratorState:
@@ -84,14 +98,14 @@ def executor_node(state: OrchestratorState) -> OrchestratorState:
 def advisor_node(state: OrchestratorState) -> OrchestratorState:
     """Delegate to AdvisorAgent for elective recommendations."""
     agent = AdvisorAgent()
-    response = agent.run(state["user_input"])
+    response = agent.run(state["user_input"], context=state.get("context", {}))
     return {**state, "response": response}
 
 
 def learning_buddy_node(state: OrchestratorState) -> OrchestratorState:
     """Delegate to LearningBuddyAgent for exam planning."""
     agent = LearningBuddyAgent()
-    response = agent.run(state["user_input"])
+    response = agent.run(state["user_input"], context=state.get("context", {}))
     return {**state, "response": response}
 
 
@@ -191,6 +205,7 @@ def run(user_input: str, thread_id: str = "default") -> tuple[str, str]:
         "user_input": user_input,
         "agent_called": "",
         "response": "",
+        "context": {},
     }
     config = {"configurable": {"thread_id": thread_id}}
 
