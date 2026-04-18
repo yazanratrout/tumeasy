@@ -110,6 +110,73 @@ class SQLiteMemory:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def clear_deadlines(self, source: str | None = None) -> int:
+        """Delete deadlines from the database.
+
+        Args:
+            source: If provided, only delete deadlines from this source
+                    (e.g. 'mock', 'tumonline', 'moodle').
+                    If None, deletes ALL deadlines.
+
+        Returns:
+            Number of rows deleted.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            if source:
+                cur = conn.execute(
+                    "DELETE FROM deadlines WHERE source = ?", (source,)
+                )
+            else:
+                cur = conn.execute("DELETE FROM deadlines")
+            return cur.rowcount
+
+    def get_upcoming_deadlines_filtered(
+        self, days: int = 7, enrolled_courses: list[str] | None = None
+    ) -> list[dict]:
+        """Return upcoming deadlines filtered by enrolled courses.
+
+        Same as get_upcoming_deadlines() but applies keyword filtering
+        against the student's enrolled course list so mock/irrelevant
+        deadlines are excluded.
+
+        Args:
+            days: Number of days ahead to look.
+            enrolled_courses: List of course name strings to filter by.
+                              If None or empty, returns all deadlines.
+
+        Returns:
+            Filtered and sorted list of deadline dicts.
+        """
+        deadlines = self.get_upcoming_deadlines(days=days)
+
+        if not enrolled_courses:
+            return deadlines
+
+        _GENERIC = {
+            "introduction", "advanced", "applied", "practical",
+            "fundamentals", "basics", "overview", "seminar",
+            "lecture", "course", "study", "studies", "special",
+            "topics", "selected", "principles",
+        }
+        kws: set[str] = set()
+        for name in enrolled_courses:
+            for word in name.split():
+                w = word.lower().rstrip("0123456789")
+                if len(w) > 3 and w not in _GENERIC:
+                    kws.add(w)
+
+        if not kws:
+            return deadlines
+
+        return [
+            d for d in deadlines
+            if d["title"].startswith("Exam Registration") or
+            any(
+                kw in (d["title"] + " " + d.get("course", "")).lower()
+                for kw in kws
+            )
+        ]
+
     # ------------------------------------------------------------------
     # Student profile
     # ------------------------------------------------------------------

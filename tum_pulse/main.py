@@ -450,7 +450,18 @@ def _save_profile_form(student_name: str, course_rows: list[dict]) -> tuple[bool
 def _background_scrape() -> None:
     st.session_state.watcher_running = True
     try:
-        # 1. Sync deadlines from TUMonline, Moodle, Confluence
+        # Clear stale mock/placeholder deadlines before live sync
+        _db.clear_deadlines(source="mock")
+        last = _db.get_last_fetched()
+        if last:
+            try:
+                from datetime import timedelta
+                age = datetime.now() - datetime.fromisoformat(last)
+                if age > timedelta(hours=24):
+                    _db.clear_deadlines()
+            except ValueError:
+                pass
+
         agent = WatcherAgent()
         summary = agent.run()
         st.session_state.watcher_status = agent.status
@@ -467,18 +478,37 @@ def _background_scrape() -> None:
         st.session_state.watcher_running = False
 
     try:
-        # 2. Auto-fetch electives in the same background thread
         from tum_pulse.agents.advisor import get_electives
-        _fresh = get_electives(_db, force_refresh=False)  # use cache if < 24h old
+        _fresh = get_electives(_db, force_refresh=False)
         _db.save_profile("electives_count", len(_fresh))
         st.session_state.electives_mode = _derive_electives_mode(len(_fresh))
     except Exception:
-        pass  # electives failure is non-critical
+        pass
 
 
 if "startup_done" not in st.session_state:
     st.session_state.startup_done = True
     threading.Thread(target=_background_scrape, daemon=True).start()
+
+# One-time cleanup of known mock deadline titles that pollute the cache
+_MOCK_TITLES = {
+    "Quiz: Probability Theory Chapter 3",
+    "Project Milestone 1",
+    "Exam Registration: Analysis 2",
+    "Homework Sheet 5 Submission",
+    "Lab Report 2",
+}
+if not st.session_state.get("mock_cleaned"):
+    st.session_state.mock_cleaned = True
+    import sqlite3 as _sqlite3
+    try:
+        with _sqlite3.connect(_db.db_path) as _conn:
+            for _title in _MOCK_TITLES:
+                _conn.execute(
+                    "DELETE FROM deadlines WHERE title = ?", (_title,)
+                )
+    except Exception:
+        pass
 
 st.session_state.electives_mode = _derive_electives_mode(_db.get_profile("electives_count") or 0)
 if st.session_state.watcher_data_mode == "unknown":
@@ -591,10 +621,15 @@ with st.sidebar:
     st.divider()
 
     st.markdown("**🔔 Upcoming (next 2 days)**")
-    _imminent = SQLiteMemory().get_upcoming_deadlines(days=2)
+    _enrolled_for_filter = _db.get_profile("courses") or []
+    _imminent = _db.get_upcoming_deadlines_filtered(
+        days=2, enrolled_courses=_enrolled_for_filter
+    )
     if _imminent:
         for _dl in _imminent:
             st.warning(f"**{_dl['title'][:40]}**  \n{_dl['deadline_date']}")
+    elif _enrolled_for_filter:
+        st.caption("No urgent deadlines for your courses in the next 2 days.")
     else:
         st.caption("No urgent deadlines cached right now.")
 
