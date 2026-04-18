@@ -68,6 +68,10 @@ html, body, [data-testid="stAppViewContainer"] {{
     padding: 4px 8px 0;
     gap: 4px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    display: flex;
+    width: 100%;
+    justify-content: space-between;
+    align-items: stretch;
 }}
 .stTabs [data-baseweb="tab"] {{
     border-radius: 8px 8px 0 0;
@@ -75,6 +79,9 @@ html, body, [data-testid="stAppViewContainer"] {{
     font-weight: 600;
     color: #555;
     border-bottom: 3px solid transparent;
+    flex: 1;
+    text-align: center;
+    min-width: 0;
 }}
 .stTabs [aria-selected="true"] {{
     color: {TUM_BLUE} !important;
@@ -85,7 +92,21 @@ html, body, [data-testid="stAppViewContainer"] {{
     background: #fff;
     border-radius: 0 0 12px 12px;
     padding: 24px;
+    padding-bottom: 25px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}}
+
+/* ── Chat input (fixed at bottom) ── */
+[data-testid="stChatInputContainer"] {{
+    position: fixed !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    width: 100% !important;
+    padding: 16px !important;
+    background: {TUM_BG} !important;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.1) !important;
+    z-index: 1000 !important;
 }}
 
 /* ── Buttons ── */
@@ -243,6 +264,11 @@ for _k, _v in {
     "zhs_slots": [],
     "zhs_search_done": False,
     "zhs_reg_result": None,
+    "chat_deadlines": [],
+    "chat_electives": [],
+    "chat_learning_buddy": [],
+    "chat_zhs": [],
+    "active_chat": "deadlines",
 }.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -613,24 +639,29 @@ with tab_chat:
 
     st.divider()
 
-    # Quick prompts
+    # Quick prompts - click to switch between separate chat tabs
     qcols = st.columns(4)
     quick_prompts = [
-        ("📅", "Deadlines this week", "What deadlines do I have this week?"),
-        ("📚", "Recommend electives", "Recommend me elective courses"),
-        ("🧠", "Learning Buddy", "Learning Buddy"),
-        ("🏃", "Book ZHS Badminton", "Register me for Badminton at ZHS"),
+        ("📅", "Deadlines this week", "deadlines"),
+        ("📚", "Recommend electives", "electives"),
+        ("🧠", "Learning Buddy", "learning_buddy"),
+        ("🏃", "Book ZHS", "zhs"),
     ]
-    for col, (icon, label, prompt) in zip(qcols, quick_prompts):
+    for col, (icon, label, chat_key) in zip(qcols, quick_prompts):
         with col:
             st.markdown('<div class="quick-btn">', unsafe_allow_html=True)
             if st.button(f"{icon} {label}", use_container_width=True):
-                st.session_state.quick_prompt = prompt
+                st.session_state.active_chat = chat_key
             st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
 
-    for msg in st.session_state.messages:
+    # Get the active chat (default to deadlines)
+    active_chat = st.session_state.get("active_chat", "deadlines")
+    chat_messages = st.session_state[f"chat_{active_chat}"]
+
+    # Display messages for the active chat
+    for msg in chat_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
@@ -647,20 +678,26 @@ with tab_chat:
         label = _AGENT_LABELS.get(st.session_state.last_agent, st.session_state.last_agent)
         st.caption(f"Last activated: **{label}**")
 
-    # --- Handle input ---
-    user_input: str = ""
-    quick = st.session_state.pop("quick_prompt", None)
-    if quick:
-        user_input = quick
-
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
+    # --- Handle input for active chat ---
+    if active_chat == "deadlines":
+        typed = st.chat_input(f"How can I help you manage your deadlines?")
+    elif active_chat == "electives":
+        typed = st.chat_input(f"How can I help you choose your electives?")
+    elif active_chat == "learning_buddy":
+        typed = st.chat_input(f"How can I help you personalise a study plan")
+    elif active_chat == "zhs":
+        typed = st.chat_input(f"How can I help you search or book ZHS sport courses?")
+    if typed:
+        # Add user message to active chat
+        chat_messages.append({"role": "user", "content": typed})
         with st.chat_message("user"):
-            st.markdown(user_input)
+            st.markdown(typed)
+
+        # Get response from orchestrator
         with st.chat_message("assistant"):
             with st.spinner("Thinking…"):
                 response, agent_called = orchestrator_run(
-                    user_input,
+                    typed,
                     thread_id=student_name or st.session_state.tum_username or "default",
                 )
             st.markdown(response)
@@ -701,13 +738,8 @@ with tab_chat:
                         "and Confluence"
                     )
 
-        st.session_state.messages.append({"role": "assistant", "content": response})
-        st.rerun()
-
-    # --- Input box LAST so it renders at bottom ---
-    typed = st.chat_input("Ask TUM Pulse anything…")
-    if typed:
-        st.session_state.quick_prompt = typed
+        # Add assistant message to active chat
+        chat_messages.append({"role": "assistant", "content": response})
         st.rerun()
 
 # ===========================================================================
