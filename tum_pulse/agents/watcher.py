@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 
-from tum_pulse.config import DB_PATH
+from tum_pulse.config import DB_PATH, TUM_USERNAME
 from tum_pulse.memory.database import SQLiteMemory
 
 TUM_API_BASE = "https://api.srv.nat.tum.de"
@@ -40,6 +40,126 @@ class WatcherAgent:
         current = next((s for s in semesters if s.get("is_current")), None)
         return current["semester_key"] if current else None
 
+    def _get_enrolled_courses(self) -> list[str]:
+        """Fetch the student's currently enrolled courses from TUM NAT API.
+
+        Tries the following in order:
+        1. GET /api/v1/students/{username} — authenticated endpoint; 401s without
+           a Bearer token but worth attempting in case an API key is configured.
+        2. GET /api/v1/course/events with semester_key — events carry course names.
+        3. SQLite profile key "courses" — set by the sidebar profile editor or a
+           previous successful fetch.
+        4. Empty list — disables enrollment filtering so all deadlines are shown.
+
+        On a successful API fetch, saves the result to SQLite so the sidebar
+        profile stays in sync automatically.
+
+        Returns:
+            List of course name strings from the student's enrollment.
+        """
+        # --- 1. Authenticated student endpoint ---
+        try:
+            if TUM_USERNAME:
+                resp = requests.get(
+                    f"{TUM_API_BASE}/api/v1/students/{TUM_USERNAME}",
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Student record may contain a "courses" or "study" list
+                    raw_courses: list = (
+                        data.get("courses")
+                        or data.get("study", {}).get("courses", [])
+                        or []
+                    )
+                    courses = [
+                        c.get("course_name_en") or c.get("course_name") or c
+                        for c in raw_courses
+                        if isinstance(c, (str, dict))
+                    ]
+                    courses = [c for c in courses if isinstance(c, str) and c]
+                    if courses:
+                        self.db.save_profile("courses", courses)
+                        print(f"[WatcherAgent] Fetched {len(courses)} enrolled courses from TUMonline")
+                        return courses
+        except Exception:
+            pass
+
+        # --- 2. Calendar events for the current semester ---
+        time.sleep(0.5)
+        try:
+            semester_key = self._get_current_semester_key()
+            if semester_key:
+                resp = requests.get(
+                    f"{TUM_API_BASE}/api/v1/course/events",
+                    params={"semester_key": semester_key, "limit": 50},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    hits = data.get("hits", []) if isinstance(data, dict) else data
+                    courses = list({
+                        h.get("course_name_en") or h.get("course_name")
+                        for h in hits
+                        if h.get("course_name_en") or h.get("course_name")
+                    })
+                    if courses:
+                        self.db.save_profile("courses", courses)
+                        print(f"[WatcherAgent] Fetched {len(courses)} enrolled courses from TUMonline")
+                        return courses
+        except Exception:
+            pass
+
+        # --- 3. SQLite profile fallback ---
+        try:
+            saved = self.db.get_profile("courses")
+            if saved and isinstance(saved, list):
+                print(f"[WatcherAgent] Using saved profile courses (API unavailable)")
+                return saved
+        except Exception:
+            pass
+
+        # --- 4. Empty — no filtering ---
+        print("[WatcherAgent] No enrolled courses found — deadlines will not be filtered")
+        return []
+
+    def _filter_by_enrollment(self, deadlines: list[dict], enrolled: list[str]) -> list[dict]:
+        """Filter deadlines to those relevant to enrolled courses.
+
+        Always keeps global exam-period deadline rows. Skips filtering entirely
+        when *enrolled* is empty so no deadlines are hidden.
+
+        Args:
+            deadlines: Full list of deadline dicts.
+            enrolled: List of enrolled course name strings.
+
+        Returns:
+            Filtered (or original) list of deadline dicts.
+        """
+        if not enrolled:
+            return deadlines
+
+        keywords: set[str] = set()
+        for name in enrolled:
+            for word in name.split():
+                if len(word) > 3:
+                    keywords.add(word.lower())
+
+        filtered: list[dict] = []
+        for dl in deadlines:
+            if dl["title"].startswith("Exam Registration Deadline"):
+                filtered.append(dl)
+                continue
+            text = (dl["title"] + " " + dl["course"]).lower()
+            if any(kw in text for kw in keywords):
+                filtered.append(dl)
+
+        print(
+            f"[WatcherAgent] Enrollment filter: {len(deadlines)} → {len(filtered)} deadline(s) "
+            f"({len(enrolled)} enrolled courses, {len(keywords)} keywords)"
+        )
+        return filtered
+
     # ------------------------------------------------------------------
     # Scrapers
     # ------------------------------------------------------------------
@@ -60,6 +180,9 @@ class WatcherAgent:
         """
         try:
             print(f"[WatcherAgent] Using REAL TUMonline API ({TUM_API_BASE})")
+
+            enrolled_courses = self._get_enrolled_courses()
+            self._last_enrolled_courses = enrolled_courses
 
             semester_key = self._get_current_semester_key()
             if not semester_key:
@@ -144,11 +267,13 @@ class WatcherAgent:
                 })
                 print(f"[WatcherAgent]   Exam reg: {course_name} → {reg_end.strftime('%Y-%m-%d')}")
 
-            print(f"[WatcherAgent] TUMonline: fetched {len(deadlines)} deadline(s)")
+            print(f"[WatcherAgent] TUMonline: fetched {len(deadlines)} deadline(s) before filtering")
+            deadlines = self._filter_by_enrollment(deadlines, enrolled_courses)
             return deadlines
 
         except Exception as exc:
             print(f"[WatcherAgent] TUMonline API failed ({exc}) — Using MOCK data")
+            self._last_enrolled_courses = []
             return self._mock_tumonline()
 
     def scrape_moodle(self) -> list[dict]:
@@ -270,10 +395,13 @@ class WatcherAgent:
             A formatted string listing all newly saved deadlines.
         """
         all_deadlines: list[dict] = []
+        self._last_enrolled_courses: list[str] = []
 
         try:
             tumonline_deadlines = self.scrape_tumonline()
             all_deadlines.extend(tumonline_deadlines)
+            if self._last_enrolled_courses:
+                self.db.save_profile("courses", self._last_enrolled_courses)
         except Exception as exc:
             print(f"[WatcherAgent] TUMonline scrape error: {exc}")
 
@@ -304,10 +432,16 @@ class WatcherAgent:
     def get_this_week(self) -> str:
         """Return a formatted list of deadlines in the next 7 days.
 
+        Applies enrollment filtering so only courses the student is enrolled in
+        are shown. Falls back to all deadlines when no enrollment data is saved.
+
         Returns:
             Human-readable string of upcoming deadlines.
         """
+        enrolled_courses = self._get_enrolled_courses()
         deadlines = self.db.get_upcoming_deadlines(days=7)
+        deadlines = self._filter_by_enrollment(deadlines, enrolled_courses)
+
         if not deadlines:
             return "No deadlines in the next 7 days. "
 
