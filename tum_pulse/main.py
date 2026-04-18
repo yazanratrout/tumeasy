@@ -15,7 +15,7 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="TUM Pulse",
+    page_title="TUM Easy",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -221,6 +221,10 @@ for _k, _v in {
     "toasted_alert_ids": set(),
     "watcher_status": {},
     "last_refreshed": None,
+    "watcher_message": "No sync has run yet.",
+    "watcher_running": False,
+    "watcher_data_mode": "unknown",
+    "electives_mode": "unknown",
     "zhs_slots": [],
     "zhs_search_done": False,
     "zhs_reg_result": None,
@@ -244,7 +248,7 @@ if not st.session_state.logged_in:
         st.markdown(f"""
         <div class="login-box">
             <div class="login-logo">🎓</div>
-            <div class="login-title">TUM Pulse</div>
+            <div class="login-title">TUM Easy</div>
             <div class="login-sub">Your AI Campus Co-Pilot for TU Munich</div>
         </div>
         """, unsafe_allow_html=True)
@@ -293,7 +297,7 @@ if not st.session_state.logged_in:
         st.markdown("""
         <p style='text-align:center;color:#888;font-size:0.82rem;margin-top:16px'>
         Credentials are stored only in your local <code>.env</code> file.<br>
-        TUM Pulse never transmits them outside your machine.
+        TUM Easy stores credentials only on your machine when you choose to remember them.
         </p>
         """, unsafe_allow_html=True)
 
@@ -307,7 +311,7 @@ from tum_pulse.agents.orchestrator import run as orchestrator_run  # noqa: E402
 from tum_pulse.agents.watcher import WatcherAgent                   # noqa: E402
 from tum_pulse.memory.database import SQLiteMemory                  # noqa: E402
 
-_DEFAULT_COURSES = [
+_COURSE_PLACEHOLDER = [
     "Introduction to Programming",
     "Linear Algebra",
     "Analysis",
@@ -316,20 +320,141 @@ _DEFAULT_COURSES = [
 
 _db = SQLiteMemory()
 
-if not _db.get_profile("courses"):
-    _db.save_profile("courses", _DEFAULT_COURSES)
+
+def _derive_deadlines_mode(status: dict[str, str], has_cached: bool) -> str:
+    values = {v for v in status.values() if v}
+    if "live" in values:
+        return "live"
+    if has_cached:
+        return "cached"
+    if "mock" in values:
+        return "demo"
+    if values and values <= {"skipped", "not run"}:
+        return "waiting"
+    return "unknown"
+
+
+def _derive_electives_mode(count: int) -> str:
+    return "live" if count > 15 else "demo"
+
+
+def _mode_badge(mode: str) -> str:
+    mapping = {
+        "live": "🟢 Live",
+        "cached": "🔵 Cached",
+        "demo": "🟠 Demo",
+        "waiting": "⚪ Waiting",
+        "unknown": "⚫ Unknown",
+    }
+    return mapping.get(mode, mode.title())
+
+
+def _safe_grade_rows(
+    saved_courses: list | None,
+    saved_grades: dict | None,
+    selected_courses: list | None = None,
+) -> list[dict[str, object]]:
+    grades = saved_grades if isinstance(saved_grades, dict) else {}
+    courses = saved_courses if isinstance(saved_courses, list) else []
+    selected = {str(course).strip() for course in (selected_courses or []) if str(course).strip()}
+
+    ordered_courses: list[str] = []
+    seen: set[str] = set()
+    for course in [*courses, *grades.keys()]:
+        course_name = str(course).strip()
+        if course_name and course_name not in seen:
+            ordered_courses.append(course_name)
+            seen.add(course_name)
+
+    rows: list[dict[str, object]] = []
+    for course in ordered_courses:
+        grade_value = grades.get(course)
+        try:
+            grade_value = float(grade_value) if grade_value not in (None, "") else None
+        except (TypeError, ValueError):
+            grade_value = None
+        rows.append(
+            {
+                "Use for Recommendations": course in selected,
+                "Course": course,
+                "Grade": grade_value,
+            }
+        )
+
+    if not rows:
+        rows.append(
+            {
+                "Use for Recommendations": False,
+                "Course": "",
+                "Grade": None,
+            }
+        )
+    return rows
+
+
+def _save_profile_form(student_name: str, grades_rows: list[dict]) -> tuple[bool, str]:
+    cleaned_courses: list[str] = []
+    grades: dict[str, float] = {}
+    selected_courses: list[str] = []
+
+    for row in grades_rows:
+        course = str(row.get("Course", "")).strip()
+        grade = row.get("Grade")
+        use_for_recommendations = bool(row.get("Use for Recommendations", False))
+
+        if not course:
+            continue
+
+        if course not in cleaned_courses:
+            cleaned_courses.append(course)
+
+        if use_for_recommendations and course not in selected_courses:
+            selected_courses.append(course)
+
+        if grade not in (None, ""):
+            try:
+                grades[course] = float(grade)
+            except (TypeError, ValueError):
+                return False, f"Invalid grade for '{course}'. Use numbers like 1.7 or 2.3."
+
+    if student_name.strip():
+        _db.save_profile("name", student_name.strip())
+    _db.save_profile("courses", cleaned_courses)
+    _db.save_profile("grades", grades)
+    _db.save_profile("selected_recommendation_courses", selected_courses)
+    _selected_grades = {course: grades[course] for course in selected_courses if course in grades}
+    _db.save_profile("selected_recommendation_grades", _selected_grades)
+    return True, "Profile saved."
 
 
 def _background_scrape() -> None:
+    st.session_state.watcher_running = True
+    st.session_state.watcher_message = "Syncing TUMonline, Moodle, and Confluence in the background…"
     try:
-        WatcherAgent().run()
-    except Exception:
-        pass
+        agent = WatcherAgent()
+        summary = agent.run()
+        st.session_state.watcher_status = agent.status
+        st.session_state.last_refreshed = datetime.now().strftime("%H:%M:%S")
+        st.session_state.watcher_message = summary
+    except Exception as exc:
+        st.session_state.watcher_message = f"Background sync failed: {exc}"
+    finally:
+        has_cached = bool(_db.get_upcoming_deadlines(days=120))
+        st.session_state.watcher_data_mode = _derive_deadlines_mode(st.session_state.watcher_status, has_cached)
+        st.session_state.electives_mode = _derive_electives_mode(_db.get_profile("electives_count") or 0)
+        st.session_state.watcher_running = False
 
 
 if "startup_done" not in st.session_state:
     st.session_state.startup_done = True
     threading.Thread(target=_background_scrape, daemon=True).start()
+
+st.session_state.electives_mode = _derive_electives_mode(_db.get_profile("electives_count") or 0)
+if st.session_state.watcher_data_mode == "unknown":
+    st.session_state.watcher_data_mode = _derive_deadlines_mode(
+        st.session_state.watcher_status,
+        bool(_db.get_upcoming_deadlines(days=120)),
+    )
 
 for _alert in _db.get_pending_alerts():
     if _alert["id"] not in st.session_state.toasted_alert_ids:
@@ -345,7 +470,7 @@ with st.sidebar:
     st.markdown(f"""
     <div style='text-align:center;padding:8px 0 4px'>
         <div style='font-size:2.4rem'>🎓</div>
-        <div style='font-size:1.2rem;font-weight:700;letter-spacing:1px'>TUM PULSE</div>
+        <div style='font-size:1.2rem;font-weight:700;letter-spacing:1px'>TUM EASY</div>
         <div style='font-size:0.8rem;opacity:0.75;margin-top:2px'>Campus Co-Pilot</div>
     </div>
     """, unsafe_allow_html=True)
@@ -357,44 +482,85 @@ with st.sidebar:
 
     st.divider()
 
-    _saved_courses = _db.get_profile("courses") or _DEFAULT_COURSES
-    _saved_grades = _db.get_profile("grades") or {
-        "Linear Algebra": 1.7,
-        "Analysis": 2.3,
-        "Algorithms and Data Structures": 2.0,
-        "Probability Theory": 2.7,
-    }
-    default_profile = json.dumps({"grades": _saved_grades, "courses": _saved_courses}, indent=2)
-    profile_json = st.text_area("Grades & Courses (JSON)", value=default_profile, height=180)
-    st.caption("Synced automatically from TUMonline on each refresh.")
+    _saved_courses = _db.get_profile("courses") or []
+    _saved_grades = _db.get_profile("grades") or {}
+    _selected_recommendation_courses = _db.get_profile("selected_recommendation_courses") or []
 
-    if st.button("💾 Save Profile", use_container_width=True):
-        try:
-            profile = json.loads(profile_json)
-            if "grades" in profile:
-                _db.save_profile("grades", profile["grades"])
-            if "courses" in profile:
-                _db.save_profile("courses", profile["courses"])
-            if student_name:
-                _db.save_profile("name", student_name)
-            st.success("Saved!")
-        except json.JSONDecodeError:
-            st.error("Invalid JSON.")
+    _saved_grades_rows = _safe_grade_rows(
+        _saved_courses,
+        _saved_grades,
+        _selected_recommendation_courses,
+    )
+
+    st.markdown("**Data Sources**")
+    st.caption(f"Deadlines: {_mode_badge(st.session_state.watcher_data_mode)}")
+    if st.session_state.last_refreshed:
+        st.caption(f"Last deadline sync: {st.session_state.last_refreshed}")
+    if st.session_state.watcher_running:
+        st.info("Deadline sync is running in the background.")
+    elif st.session_state.watcher_message:
+        st.caption(st.session_state.watcher_message)
+
+    _electives_count = SQLiteMemory().get_profile("electives_count") or 0
+    st.caption(f"Electives: {_mode_badge(st.session_state.electives_mode)}")
+    if st.session_state.electives_mode == "live":
+        st.caption(f"{_electives_count} real TUM electives currently cached.")
+    else:
+        st.caption("Using the built-in demo elective catalogue until a live refresh succeeds.")
 
     st.divider()
 
-    _electives_count = SQLiteMemory().get_profile("electives_count") or 0
-    if _electives_count > 15:
-        st.caption(f"📚 {_electives_count} real TUM electives loaded")
-    else:
-        st.caption("📚 Using sample elective catalogue")
+    with st.expander("👤 Profile", expanded=True):
+        st.caption("Your course table is the single source of truth. Check specific courses to guide elective recommendations.")
+        grades_df = pd.DataFrame(_saved_grades_rows)
+        edited_grades = st.data_editor(
+            grades_df,
+            use_container_width=True,
+            num_rows="dynamic",
+            hide_index=True,
+            column_config={
+                "Use for Recommendations": st.column_config.CheckboxColumn(
+                    "Recommend From",
+                    help="Checked courses are used for elective recommendations. If none are checked, TUM Easy uses all courses by default.",
+                    default=False,
+                ),
+                "Course": st.column_config.TextColumn("Course", width="large"),
+                "Grade": st.column_config.NumberColumn("Grade", min_value=1.0, max_value=5.0, step=0.1, format="%.1f"),
+            },
+            column_order=["Use for Recommendations", "Course", "Grade"],
+        )
+        _selected_count = int(edited_grades["Use for Recommendations"].fillna(False).astype(bool).sum()) if "Use for Recommendations" in edited_grades else 0
+        if _selected_count:
+            st.caption(f"{_selected_count} course(s) selected for elective recommendations.")
+        else:
+            st.caption("No course selected. TUM Easy will use all listed courses for recommendations by default.")
+        st.caption("Grades are optional. Leave grade cells empty if you only want to store the course.")
+
+        if st.button("💾 Save Profile", use_container_width=True):
+            ok, msg = _save_profile_form(student_name, edited_grades.to_dict("records"))
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+        profile_mode = "live" if (_saved_courses or _saved_grades) else "demo"
+        st.caption(f"Profile status: {_mode_badge(profile_mode)}")
+        if not (_saved_courses or _saved_grades):
+            st.caption("No synced profile found yet. Add courses manually or run a live refresh.")
+
+    st.divider()
 
     if st.button("🔄 Refresh Electives", use_container_width=True):
         from tum_pulse.agents.advisor import get_electives
         _edb = SQLiteMemory()
         _fresh = get_electives(_edb, force_refresh=True)
         _edb.save_profile("electives_count", len(_fresh))
-        st.success(f"Loaded {len(_fresh)} electives!")
+        st.session_state.electives_mode = _derive_electives_mode(len(_fresh))
+        if len(_fresh) > 15:
+            st.success(f"Loaded {len(_fresh)} live electives.")
+        else:
+            st.warning(f"Loaded {len(_fresh)} electives. This still looks like demo/sample coverage.")
         st.rerun()
 
     st.divider()
@@ -405,15 +571,15 @@ with st.sidebar:
         for _dl in _imminent:
             st.warning(f"**{_dl['title'][:40]}**  \n{_dl['deadline_date']}")
     else:
-        st.caption("No urgent deadlines.")
+        st.caption("No urgent deadlines cached right now.")
 
     st.divider()
 
     if st.session_state.watcher_status:
-        st.markdown("**System Status**")
-        _icons = {"live": "🟢", "mock": "🟠", "skipped": "⚫", "not run": "⚫"}
+        st.markdown("**Per-source status**")
+        _icons = {"live": "🟢", "mock": "🟠", "skipped": "⚫", "not run": "⚪"}
         for src, state in st.session_state.watcher_status.items():
-            st.caption(f"{_icons.get(state,'⚫')} {src.title()}: {state}")
+            st.caption(f"{_icons.get(state,'⚫')} {src.title()}: {state.title()}")
         st.divider()
 
     if st.button("🚪 Sign out", use_container_width=True):
@@ -441,7 +607,7 @@ with tab_chat:
     <div style='display:flex;align-items:center;gap:12px;margin-bottom:4px'>
         <span style='font-size:2rem'>🎓</span>
         <div>
-            <h2 style='margin:0;color:{TUM_DARK_BLUE}'>TUM Pulse</h2>
+            <h2 style='margin:0;color:{TUM_DARK_BLUE}'>TUM Easy</h2>
             <p style='margin:0;color:#666;font-size:0.9rem'>Ask me about deadlines, electives, ZHS or exam prep</p>
         </div>
     </div>
@@ -488,7 +654,7 @@ with tab_chat:
     if quick:
         user_input = quick
 
-    typed = st.chat_input("Ask TUM Pulse anything…")
+    typed = st.chat_input("Ask TUM Easy anything…")
     if typed:
         user_input = typed
 
@@ -513,7 +679,7 @@ with tab_chat:
 
 with tab_deadlines:
     st.markdown(f"<h2 style='color:{TUM_DARK_BLUE};margin-bottom:4px'>📅 Upcoming Deadlines</h2>", unsafe_allow_html=True)
-    st.caption("Live data from TUMonline, Moodle, and Confluence.")
+    st.caption("TUM Easy shows whether each source is live, cached, or demo so you know how trustworthy the data is.")
 
     col_btn, col_status = st.columns([2, 5])
     with col_btn:
@@ -521,23 +687,38 @@ with tab_deadlines:
 
     if refresh:
         with st.spinner("Logging in and scraping TUMonline, Moodle, Confluence…"):
+            st.session_state.watcher_running = True
             agent = WatcherAgent()
-            agent.run()
+            summary = agent.run()
             st.session_state.watcher_status = agent.status
             st.session_state.last_refreshed = datetime.now().strftime("%H:%M:%S")
-        st.success("Refresh complete!")
+            st.session_state.watcher_message = summary
+            st.session_state.watcher_data_mode = _derive_deadlines_mode(
+                agent.status,
+                bool(SQLiteMemory().get_upcoming_deadlines(days=120)),
+            )
+            st.session_state.watcher_running = False
+        if st.session_state.watcher_data_mode == "live":
+            st.success("Refresh complete — live data loaded.")
+        elif st.session_state.watcher_data_mode == "cached":
+            st.warning("Refresh finished, but TUM Easy is still relying on cached deadlines.")
+        else:
+            st.warning("Refresh finished, but some sources are still in demo/fallback mode.")
         st.rerun()
 
     with col_status:
+        st.markdown(f"**Overall mode:** {_mode_badge(st.session_state.watcher_data_mode)}")
         if st.session_state.watcher_status:
-            _BADGE = {"live": "🟢 live", "mock": "🟠 mock", "skipped": "⚫ skipped", "not run": "⚫ not run"}
+            _BADGE = {"live": "🟢 live", "mock": "🟠 demo", "skipped": "⚫ skipped", "not run": "⚪ not run"}
             parts = [
                 f"**{src.title()}** — {_BADGE.get(state, state)}"
                 for src, state in st.session_state.watcher_status.items()
             ]
             st.markdown("   ·   ".join(parts))
-            if st.session_state.last_refreshed:
-                st.caption(f"Last refreshed at {st.session_state.last_refreshed}")
+        if st.session_state.last_refreshed:
+            st.caption(f"Last refreshed at {st.session_state.last_refreshed}")
+        if st.session_state.watcher_message:
+            st.caption(st.session_state.watcher_message)
 
     st.divider()
 
@@ -545,8 +726,8 @@ with tab_deadlines:
     deadlines = db.get_upcoming_deadlines(days=120)
 
     if not deadlines:
-        st.info("No deadlines cached yet — hit **🔄 Refresh** to pull your live TUM data.")
-        st.caption("Preview (mock data):")
+        st.info("No cached deadlines yet. Use **🔄 Refresh** to try a live sync.")
+        st.warning("Showing demo preview data so the page is not empty.")
         from tum_pulse.agents.watcher import _mock_tumonline, _mock_moodle
         deadlines = _mock_tumonline() + _mock_moodle()
         is_mock_preview = True
@@ -703,7 +884,7 @@ with tab_zhs:
     st.markdown(f"""
     <div class='tum-card'>
         <b style='color:{TUM_DARK_BLUE}'>How it works</b><br><br>
-        1. TUM Pulse logs into <code>kurse.zhs-muenchen.de</code> with your TUM SSO credentials<br>
+        1. TUM Easy logs into <code>kurse.zhs-muenchen.de</code> with your TUM SSO credentials<br>
         2. Searches available sport courses matching your query<br>
         3. Click <b>Buchen</b> to register — confirmation sent to your TUM email
     </div>
@@ -714,7 +895,7 @@ with tab_zhs:
 # ===========================================================================
 
 with tab_about:
-    st.markdown(f"<h2 style='color:{TUM_DARK_BLUE}'>About TUM Pulse 🎓</h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2 style='color:{TUM_DARK_BLUE}'>About TUM Easy 🎓</h2>", unsafe_allow_html=True)
 
     col_left, col_right = st.columns(2)
 
@@ -722,7 +903,7 @@ with tab_about:
         st.markdown(f"""
         <div class='tum-card'>
             <b style='color:{TUM_DARK_BLUE};font-size:1.05rem'>What is TUM Pulse?</b><br><br>
-            TUM Pulse is your AI-powered Campus Co-Pilot for TU Munich. It connects your
+            TUM Easy is your AI-powered Campus Co-Pilot for TUM. It connects your
             academic systems and automates repetitive tasks through one conversational interface.<br><br>
             <b>Agents</b><br>
             📅 <b>Watcher</b> — scrapes TUMonline, Moodle & Confluence for deadlines<br>
