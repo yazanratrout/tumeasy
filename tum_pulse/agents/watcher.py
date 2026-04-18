@@ -14,6 +14,7 @@ from typing import Any
 import requests
 
 from tum_pulse.config import (
+    CONFLUENCE_PAT,
     CONFLUENCE_PASSWORD,
     CONFLUENCE_SPACE,
     CONFLUENCE_URL,
@@ -381,10 +382,17 @@ class WatcherAgent:
             from atlassian import Confluence
             from tum_pulse.connectors.tumonline import parse_date as _parse_date
 
+            if not CONFLUENCE_PAT:
+                # collab.dvb.bayern has basic auth disabled; PAT is required.
+                # Generate one at: https://collab.dvb.bayern/plugins/personalaccesstokens/usertokens.action
+                # Then add CONFLUENCE_PAT=<token> to your .env file.
+                print("[WatcherAgent] Confluence skipped: CONFLUENCE_PAT not set (basic auth disabled on collab.dvb.bayern)")
+                self.status["confluence"] = "skipped"
+                return []
+
             confluence = Confluence(
                 url=CONFLUENCE_URL,
-                username=CONFLUENCE_USERNAME,
-                password=CONFLUENCE_PASSWORD,
+                token=CONFLUENCE_PAT,
                 timeout=20,
             )
             space_filter = f"AND space = '{CONFLUENCE_SPACE}'" if CONFLUENCE_SPACE else ""

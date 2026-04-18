@@ -39,6 +39,8 @@ S3_BUCKET_NAME: str = os.getenv(
 CONFLUENCE_URL: str = os.getenv("CONFLUENCE_URL", "https://collab.dvb.bayern")
 CONFLUENCE_USERNAME: str = os.getenv("CONFLUENCE_USERNAME", TUM_USERNAME)
 CONFLUENCE_PASSWORD: str = os.getenv("CONFLUENCE_PASSWORD", TUM_PASSWORD)
+# Personal Access Token — required when basic auth is disabled (preferred over password)
+CONFLUENCE_PAT: str = os.getenv("CONFLUENCE_PAT", "")
 CONFLUENCE_SPACE: str = os.getenv("CONFLUENCE_SPACE", "")
 
 # Screenshots / artifacts
