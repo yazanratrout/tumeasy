@@ -176,6 +176,21 @@ hr {{ border-color: rgba(0,101,189,0.12); }}
     color: #fff !important;
     border-color: {TUM_BLUE} !important;
 }}
+
+/* ── Pin chat input to bottom ── */
+[data-testid="stChatInput"] {{
+    position: sticky;
+    bottom: 0;
+    background: {TUM_BG};
+    padding: 12px 0 4px 0;
+    z-index: 100;
+    border-top: 1px solid rgba(0,101,189,0.10);
+}}
+
+/* ── Make chat messages area scrollable above input ── */
+[data-testid="stChatMessageContainer"] {{
+    padding-bottom: 80px;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -620,7 +635,7 @@ with tab_chat:
     quick_prompts = [
         ("📅", "Deadlines this week", "What deadlines do I have this week?"),
         ("📚", "Recommend electives", "Recommend me elective courses"),
-        ("🧠", "Help pass Analysis 2", "Help me pass Analysis 2"),
+        ("🧠", "Learning Buddy", "Learning Buddy"),
         ("🏃", "Book ZHS Badminton", "Register me for Badminton at ZHS"),
     ]
     for col, (icon, label, prompt) in zip(qcols, quick_prompts):
@@ -649,14 +664,11 @@ with tab_chat:
         label = _AGENT_LABELS.get(st.session_state.last_agent, st.session_state.last_agent)
         st.caption(f"Last activated: **{label}**")
 
+    # --- Handle input ---
     user_input: str = ""
     quick = st.session_state.pop("quick_prompt", None)
     if quick:
         user_input = quick
-
-    typed = st.chat_input("Ask TUM Easy anything…")
-    if typed:
-        user_input = typed
 
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
@@ -671,6 +683,12 @@ with tab_chat:
             st.markdown(response)
             st.session_state.last_agent = agent_called
         st.session_state.messages.append({"role": "assistant", "content": response})
+        st.rerun()
+
+    # --- Input box LAST so it renders at bottom ---
+    typed = st.chat_input("Ask TUM Pulse anything…")
+    if typed:
+        st.session_state.quick_prompt = typed
         st.rerun()
 
 # ===========================================================================
@@ -902,7 +920,7 @@ with tab_about:
     with col_left:
         st.markdown(f"""
         <div class='tum-card'>
-            <b style='color:{TUM_DARK_BLUE};font-size:1.05rem'>What is TUM Pulse?</b><br><br>
+            <b style='color:{TUM_DARK_BLUE};font-size:1.05rem'>What is TUM Easy?</b><br><br>
             TUM Easy is your AI-powered Campus Co-Pilot for TUM. It connects your
             academic systems and automates repetitive tasks through one conversational interface.<br><br>
             <b>Agents</b><br>

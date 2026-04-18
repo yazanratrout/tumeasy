@@ -730,21 +730,64 @@ Format as clean markdown with ## Week headers."""
         if "weak_subjects" not in ctx:
             ctx["weak_subjects"] = _infer_weak_subjects(ctx.get("grades", {}))
 
-        # Step 1: Check if any known enrolled course name appears in the input
+        # Use Claude to extract course name from user input
+        # This is far more reliable than regex/filler removal
         known_courses = self.db.get_profile("courses") or ctx.get("courses") or []
         course_name = None
-        best_match_len = 0
-        user_lower = user_input.lower()
 
-        for course in known_courses:
-            if course.lower() in user_lower and len(course) > best_match_len:
-                course_name = course
-                best_match_len = len(course)
+        # Step 1: Try Claude extraction first
+        try:
+            extraction_prompt = f"""Extract the course/subject name from this student message.
 
-        if course_name:
-            print(f"[LearningBuddy] Matched course from profile: '{course_name}'")
+Student message: "{user_input}"
 
-        # Step 2: Check for course code mention e.g. "IN2346", "MA9412"
+Known enrolled courses:
+{chr(10).join(f"- {c}" for c in known_courses) if known_courses else "- (none saved yet)"}
+
+Rules:
+- If the student mentions a course that matches or closely matches one in
+  the enrolled list, return that exact enrolled course name
+- If no match, return just the course/subject name they mentioned
+  (e.g. "Analysis 3", "Machine Learning", "Linear Algebra")
+- Return ONLY the course name, nothing else — no explanation, no punctuation
+- If you truly cannot find a course name, return: UNKNOWN
+
+Course name:"""
+
+            extracted = self.bedrock.invoke(
+                extraction_prompt, max_tokens=30
+            ).strip().strip('"').strip("'")
+
+            if extracted and extracted != "UNKNOWN" and len(extracted) > 1:
+                # Check if it matches an enrolled course
+                extracted_lower = extracted.lower()
+                for course in known_courses:
+                    if (extracted_lower in course.lower() or
+                            course.lower() in extracted_lower or
+                            extracted_lower == course.lower()):
+                        course_name = course
+                        print(f"[LearningBuddy] Claude matched to enrolled course: '{course_name}'")
+                        break
+
+                if not course_name:
+                    course_name = extracted
+                    print(f"[LearningBuddy] Claude extracted course name: '{course_name}'")
+
+        except Exception as exc:
+            print(f"[LearningBuddy] Claude extraction failed: {exc}")
+
+        # Step 2: Direct string match fallback
+        if not course_name:
+            user_lower = user_input.lower()
+            best_match_len = 0
+            for course in known_courses:
+                if course.lower() in user_lower and len(course) > best_match_len:
+                    course_name = course
+                    best_match_len = len(course)
+            if course_name:
+                print(f"[LearningBuddy] Matched course from profile: '{course_name}'")
+
+        # Step 3: Course code fallback
         if not course_name:
             code_match = re.search(r'\b([A-Z]{2,3}\d{4,5})\b', user_input.upper())
             if code_match:
@@ -752,40 +795,8 @@ Format as clean markdown with ## Week headers."""
                 for course in known_courses:
                     if code.lower() in course.lower():
                         course_name = course
-                        print(f"[LearningBuddy] Matched via course code {code}: '{course_name}'")
+                        print(f"[LearningBuddy] Matched via course code: '{course_name}'")
                         break
-
-        # Step 3: Smart keyword extraction — find the course name after
-        # trigger phrases, skipping filler words
-        if not course_name:
-            # Remove common filler phrases to isolate the course name
-            cleaned = user_lower
-            fillers = [
-                "can you please", "can you", "please", "help me", "help",
-                "i want to", "i need to", "i have to", "i must",
-                "make me a", "make a", "create a", "give me a",
-                "studying plan", "study plan", "a plan", "plan for",
-                "make sure i", "to pass", "pass", "prepare for",
-                "prepare", "study for", "study", "exam for", "exam",
-                "for the", "for my", "for",
-            ]
-            for filler in fillers:
-                cleaned = cleaned.replace(filler, " ")
-
-            # Remove timeline words so they don't get picked as course name
-            cleaned = re.sub(
-                r'\b(\d+\s*)?(day|days|week|weeks|month|months|tomorrow|tonight|'
-                r'a week|next week|make|studying|a study)\b', ' ', cleaned
-            )
-
-            # Remove punctuation and collapse whitespace
-            cleaned = re.sub(r'[^\w\s]', ' ', cleaned)
-            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-
-            # What remains should be the course name
-            if len(cleaned) > 2:
-                course_name = cleaned.title().strip()
-                print(f"[LearningBuddy] Extracted course name: '{course_name}'")
 
         # Step 4: Final fallback
         if not course_name or len(course_name) < 2:
