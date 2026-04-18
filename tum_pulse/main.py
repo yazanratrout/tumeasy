@@ -1,6 +1,8 @@
 """TUM Pulse — Streamlit chat interface entry point."""
 
 import json
+import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -8,53 +10,302 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from tum_pulse.agents.orchestrator import run as orchestrator_run
-from tum_pulse.agents.watcher import WatcherAgent
-from tum_pulse.memory.database import SQLiteMemory
-
 # ---------------------------------------------------------------------------
-# Page config
+# Page config — must be first Streamlit call
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
     page_title="TUM Pulse",
     page_icon="🎓",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.markdown("""
+# ---------------------------------------------------------------------------
+# TUM brand CSS
+# ---------------------------------------------------------------------------
+
+TUM_BLUE       = "#0065BD"
+TUM_DARK_BLUE  = "#003359"
+TUM_LIGHT_BLUE = "#64A0C8"
+TUM_ORANGE     = "#E37222"
+TUM_BG         = "#F0F4F8"
+
+st.markdown(f"""
 <style>
-[data-testid="stSidebar"] { background: linear-gradient(180deg, #0d2a6e 0%, #1a3a8f 100%); }
-[data-testid="stSidebar"] * { color: white !important; }
-[data-testid="stSidebar"] input { color: #111 !important; }
-[data-testid="stSidebar"] textarea { color: #111 !important; }
+/* ── Global ── */
+html, body, [data-testid="stAppViewContainer"] {{
+    background: {TUM_BG};
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {{
+    background: linear-gradient(170deg, {TUM_DARK_BLUE} 0%, {TUM_BLUE} 100%);
+    border-right: none;
+}}
+[data-testid="stSidebar"] * {{ color: #fff !important; }}
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] textarea {{ color: #111 !important; background: #fff !important; border-radius: 6px; }}
+[data-testid="stSidebar"] .stButton button {{
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.35);
+    color: #fff !important;
+    border-radius: 8px;
+    transition: background 0.2s;
+}}
+[data-testid="stSidebar"] .stButton button:hover {{
+    background: rgba(255,255,255,0.28);
+}}
+
+/* ── Top header bar ── */
+[data-testid="stHeader"] {{ background: {TUM_DARK_BLUE}; }}
+
+/* ── Tab bar ── */
+.stTabs [data-baseweb="tab-list"] {{
+    background: #fff;
+    border-radius: 12px 12px 0 0;
+    padding: 4px 8px 0;
+    gap: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}}
+.stTabs [data-baseweb="tab"] {{
+    border-radius: 8px 8px 0 0;
+    padding: 10px 20px;
+    font-weight: 600;
+    color: #555;
+    border-bottom: 3px solid transparent;
+}}
+.stTabs [aria-selected="true"] {{
+    color: {TUM_BLUE} !important;
+    border-bottom: 3px solid {TUM_BLUE} !important;
+    background: {TUM_BG} !important;
+}}
+.stTabs [data-baseweb="tab-panel"] {{
+    background: #fff;
+    border-radius: 0 0 12px 12px;
+    padding: 24px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}}
+
+/* ── Buttons ── */
+.stButton > button {{
+    border-radius: 8px;
+    font-weight: 600;
+    border: 2px solid {TUM_BLUE};
+    color: {TUM_BLUE};
+    background: #fff;
+    transition: all 0.2s;
+}}
+.stButton > button:hover {{
+    background: {TUM_BLUE};
+    color: #fff;
+}}
+.stButton > button[kind="primary"] {{
+    background: {TUM_BLUE};
+    color: #fff;
+}}
+
+/* ── Chat bubbles ── */
+[data-testid="stChatMessage"] {{
+    border-radius: 12px;
+    margin-bottom: 8px;
+    padding: 4px 0;
+}}
+
+/* ── Metric / info cards ── */
+.tum-card {{
+    background: #fff;
+    border-radius: 12px;
+    padding: 20px 24px;
+    border-left: 5px solid {TUM_BLUE};
+    box-shadow: 0 2px 10px rgba(0,101,189,0.08);
+    margin-bottom: 12px;
+}}
+.tum-card-orange {{
+    border-left-color: {TUM_ORANGE};
+}}
+
+/* ── Login page ── */
+.login-box {{
+    max-width: 440px;
+    margin: 60px auto;
+    background: #fff;
+    border-radius: 16px;
+    padding: 48px 44px 40px;
+    box-shadow: 0 8px 40px rgba(0,53,89,0.15);
+    text-align: center;
+}}
+.login-logo {{
+    font-size: 3rem;
+    margin-bottom: 8px;
+}}
+.login-title {{
+    color: {TUM_DARK_BLUE};
+    font-size: 1.7rem;
+    font-weight: 700;
+    margin-bottom: 4px;
+}}
+.login-sub {{
+    color: #666;
+    font-size: 0.95rem;
+    margin-bottom: 32px;
+}}
+
+/* ── Dataframe ── */
+[data-testid="stDataFrame"] {{ border-radius: 10px; overflow: hidden; }}
+
+/* ── Divider ── */
+hr {{ border-color: rgba(0,101,189,0.12); }}
+
+/* ── Status badges ── */
+.badge-live   {{ color: #1a7f37; font-weight: 700; }}
+.badge-mock   {{ color: #d97706; font-weight: 700; }}
+.badge-skip   {{ color: #888;    font-weight: 700; }}
+
+/* ── Quick prompt buttons ── */
+.quick-btn button {{
+    background: linear-gradient(135deg, {TUM_BLUE}18, {TUM_LIGHT_BLUE}22) !important;
+    border: 1.5px solid {TUM_BLUE}44 !important;
+    color: {TUM_DARK_BLUE} !important;
+    font-size: 0.88rem;
+    padding: 10px 8px;
+}}
+.quick-btn button:hover {{
+    background: {TUM_BLUE} !important;
+    color: #fff !important;
+    border-color: {TUM_BLUE} !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Session state
+# .env helper
 # ---------------------------------------------------------------------------
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "last_agent" not in st.session_state:
-    st.session_state.last_agent = ""
-if "toasted_alert_ids" not in st.session_state:
-    st.session_state.toasted_alert_ids = set()
-if "watcher_status" not in st.session_state:
-    st.session_state.watcher_status = {}
-if "last_refreshed" not in st.session_state:
-    st.session_state.last_refreshed = None
-if "zhs_slots" not in st.session_state:
-    st.session_state.zhs_slots = []
-if "zhs_search_done" not in st.session_state:
-    st.session_state.zhs_search_done = False
-if "zhs_reg_result" not in st.session_state:
-    st.session_state.zhs_reg_result = None
+_ENV_PATH = Path(__file__).parent.parent / ".env"
+
+
+def _update_env(updates: dict[str, str]) -> None:
+    """Write or update key=value lines in the .env file."""
+    lines: list[str] = []
+    if _ENV_PATH.exists():
+        lines = _ENV_PATH.read_text().splitlines()
+
+    for key, value in updates.items():
+        quoted = f'"{value}"'
+        pattern = re.compile(rf"^{re.escape(key)}\s*=")
+        replaced = False
+        for i, line in enumerate(lines):
+            if pattern.match(line):
+                lines[i] = f"{key}={quoted}"
+                replaced = True
+                break
+        if not replaced:
+            lines.append(f"{key}={quoted}")
+
+    _ENV_PATH.write_text("\n".join(lines) + "\n")
+    # Propagate into current process immediately
+    for key, value in updates.items():
+        os.environ[key] = value
 
 # ---------------------------------------------------------------------------
-# Startup: seed courses + background scrape + surface pending alerts
+# Session state defaults
 # ---------------------------------------------------------------------------
+
+for _k, _v in {
+    "logged_in": False,
+    "tum_username": "",
+    "messages": [],
+    "last_agent": "",
+    "toasted_alert_ids": set(),
+    "watcher_status": {},
+    "last_refreshed": None,
+    "zhs_slots": [],
+    "zhs_search_done": False,
+    "zhs_reg_result": None,
+}.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+# Auto-login if credentials already in env
+from tum_pulse.config import TUM_USERNAME, TUM_PASSWORD  # noqa: E402
+if TUM_USERNAME and TUM_PASSWORD and not st.session_state.logged_in:
+    st.session_state.logged_in = True
+    st.session_state.tum_username = TUM_USERNAME
+
+# ===========================================================================
+# LOGIN PAGE
+# ===========================================================================
+
+if not st.session_state.logged_in:
+    _, _c2, _ = st.columns([1, 2, 1])
+    with _c2:
+        st.markdown(f"""
+        <div class="login-box">
+            <div class="login-logo">🎓</div>
+            <div class="login-title">TUM Pulse</div>
+            <div class="login-sub">Your AI Campus Co-Pilot for TU Munich</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.form("login_form"):
+            username = st.text_input(
+                "TUM Username",
+                placeholder="ge12abc",
+                help="Your TUM identifier (same as TUMonline / Moodle login)",
+            )
+            password = st.text_input(
+                "TUM Password",
+                type="password",
+                placeholder="••••••••",
+            )
+            remember = st.checkbox("Save credentials to .env for future sessions", value=True)
+            submitted = st.form_submit_button(
+                "Sign in →",
+                use_container_width=True,
+                type="primary",
+            )
+
+        if submitted:
+            if not username or not password:
+                st.error("Please enter both username and password.")
+            else:
+                if remember:
+                    _update_env({
+                        "TUM_USERNAME": username,
+                        "TUM_PASSWORD": password,
+                        "ZHS_USERNAME": username,
+                        "ZHS_PASSWORD": password,
+                        "CONFLUENCE_USERNAME": username,
+                        "CONFLUENCE_PASSWORD": password,
+                    })
+                else:
+                    os.environ["TUM_USERNAME"] = username
+                    os.environ["TUM_PASSWORD"] = password
+                    os.environ["ZHS_USERNAME"] = username
+                    os.environ["ZHS_PASSWORD"] = password
+
+                st.session_state.logged_in = True
+                st.session_state.tum_username = username
+                st.rerun()
+
+        st.markdown("""
+        <p style='text-align:center;color:#888;font-size:0.82rem;margin-top:16px'>
+        Credentials are stored only in your local <code>.env</code> file.<br>
+        TUM Pulse never transmits them outside your machine.
+        </p>
+        """, unsafe_allow_html=True)
+
+    st.stop()
+
+# ===========================================================================
+# MAIN APP (only reached when logged_in = True)
+# ===========================================================================
+
+from tum_pulse.agents.orchestrator import run as orchestrator_run  # noqa: E402
+from tum_pulse.agents.watcher import WatcherAgent                   # noqa: E402
+from tum_pulse.memory.database import SQLiteMemory                  # noqa: E402
 
 _DEFAULT_COURSES = [
     "Introduction to Programming",
@@ -87,15 +338,24 @@ for _alert in _db.get_pending_alerts():
         st.session_state.toasted_alert_ids.add(_alert["id"])
 
 # ---------------------------------------------------------------------------
-# Sidebar — student profile
+# Sidebar
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.markdown("## 🎓 TUM Pulse")
-    st.markdown("*Your Campus Co-Pilot*")
-    st.divider()
+    st.markdown(f"""
+    <div style='text-align:center;padding:8px 0 4px'>
+        <div style='font-size:2.4rem'>🎓</div>
+        <div style='font-size:1.2rem;font-weight:700;letter-spacing:1px'>TUM PULSE</div>
+        <div style='font-size:0.8rem;opacity:0.75;margin-top:2px'>Campus Co-Pilot</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    student_name = st.text_input("Your Name", placeholder="Max Mustermann")
+    _name_saved = _db.get_profile("name") or ""
+    student_name = st.text_input("Your Name", value=_name_saved, placeholder="Max Mustermann")
+
+    st.markdown(f"<div style='opacity:0.7;font-size:0.78rem;margin-top:-8px'>Logged in as <b>{st.session_state.tum_username}</b></div>", unsafe_allow_html=True)
+
+    st.divider()
 
     _saved_courses = _db.get_profile("courses") or _DEFAULT_COURSES
     _saved_grades = _db.get_profile("grades") or {
@@ -104,51 +364,48 @@ with st.sidebar:
         "Algorithms and Data Structures": 2.0,
         "Probability Theory": 2.7,
     }
-    default_profile = json.dumps(
-        {"grades": _saved_grades, "courses": _saved_courses},
-        indent=2,
-    )
-    profile_json = st.text_area(
-        "Grades & Completed Courses (JSON)",
-        value=default_profile,
-        height=200,
-    )
-    st.caption("💡 Courses and grades are synced automatically from TUMonline on each refresh.")
+    default_profile = json.dumps({"grades": _saved_grades, "courses": _saved_courses}, indent=2)
+    profile_json = st.text_area("Grades & Courses (JSON)", value=default_profile, height=180)
+    st.caption("Synced automatically from TUMonline on each refresh.")
 
     if st.button("💾 Save Profile", use_container_width=True):
         try:
             profile = json.loads(profile_json)
-            db = SQLiteMemory()
             if "grades" in profile:
-                db.save_profile("grades", profile["grades"])
+                _db.save_profile("grades", profile["grades"])
             if "courses" in profile:
-                db.save_profile("courses", profile["courses"])
+                _db.save_profile("courses", profile["courses"])
             if student_name:
-                db.save_profile("name", student_name)
-            st.success("Profile saved!")
+                _db.save_profile("name", student_name)
+            st.success("Saved!")
         except json.JSONDecodeError:
-            st.error("Invalid JSON — please check your input.")
+            st.error("Invalid JSON.")
 
     st.divider()
 
-    st.subheader("🔔 Upcoming Alerts")
+    st.markdown("**🔔 Upcoming (next 2 days)**")
     _imminent = SQLiteMemory().get_upcoming_deadlines(days=2)
     if _imminent:
         for _dl in _imminent:
-            st.warning(f"**{_dl['title']}**  \n{_dl['course']} — {_dl['deadline_date']}")
+            st.warning(f"**{_dl['title'][:40]}**  \n{_dl['deadline_date']}")
     else:
-        st.caption("No deadlines in the next 2 days.")
+        st.caption("No urgent deadlines.")
 
     st.divider()
 
     if st.session_state.watcher_status:
         st.markdown("**System Status**")
+        _icons = {"live": "🟢", "mock": "🟠", "skipped": "⚫", "not run": "⚫"}
         for src, state in st.session_state.watcher_status.items():
-            icon = "🟢" if state == "live" else "🟠" if state == "mock" else "⚫"
-            st.caption(f"{icon} {src.title()}: {state}")
+            st.caption(f"{_icons.get(state,'⚫')} {src.title()}: {state}")
         st.divider()
 
-    st.caption("Powered by Amazon Bedrock + LangGraph")
+    if st.button("🚪 Sign out", use_container_width=True):
+        st.session_state.logged_in = False
+        st.session_state.tum_username = ""
+        st.rerun()
+
+    st.caption("Powered by Amazon Bedrock · LangGraph")
 
 # ---------------------------------------------------------------------------
 # Tabs
@@ -163,22 +420,33 @@ tab_chat, tab_deadlines, tab_zhs, tab_about = st.tabs(
 # ===========================================================================
 
 with tab_chat:
-    st.title("TUM Pulse 🎓")
-    st.caption("Ask me about deadlines, electives, ZHS registration, or exam prep.")
+    # Header
+    st.markdown(f"""
+    <div style='display:flex;align-items:center;gap:12px;margin-bottom:4px'>
+        <span style='font-size:2rem'>🎓</span>
+        <div>
+            <h2 style='margin:0;color:{TUM_DARK_BLUE}'>TUM Pulse</h2>
+            <p style='margin:0;color:#666;font-size:0.9rem'>Ask me about deadlines, electives, ZHS or exam prep</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        if st.button("📅 Deadlines this week", use_container_width=True):
-            st.session_state.quick_prompt = "What deadlines do I have this week?"
-    with col2:
-        if st.button("📚 Recommend electives", use_container_width=True):
-            st.session_state.quick_prompt = "Recommend me elective courses"
-    with col3:
-        if st.button("🧠 Help pass Analysis 2", use_container_width=True):
-            st.session_state.quick_prompt = "Help me pass Analysis 2"
-    with col4:
-        if st.button("🏃 Book ZHS Badminton", use_container_width=True):
-            st.session_state.quick_prompt = "Register me for Badminton at ZHS"
+    st.divider()
+
+    # Quick prompts
+    qcols = st.columns(4)
+    quick_prompts = [
+        ("📅", "Deadlines this week", "What deadlines do I have this week?"),
+        ("📚", "Recommend electives", "Recommend me elective courses"),
+        ("🧠", "Help pass Analysis 2", "Help me pass Analysis 2"),
+        ("🏃", "Book ZHS Badminton", "Register me for Badminton at ZHS"),
+    ]
+    for col, (icon, label, prompt) in zip(qcols, quick_prompts):
+        with col:
+            st.markdown('<div class="quick-btn">', unsafe_allow_html=True)
+            if st.button(f"{icon} {label}", use_container_width=True):
+                st.session_state.quick_prompt = prompt
+            st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
 
@@ -187,13 +455,13 @@ with tab_chat:
             st.markdown(msg["content"])
 
     _AGENT_LABELS: dict[str, str] = {
-        "deadlines": "📅 Watcher Agent",
-        "zhs_registration": "🏃 Executor Agent",
+        "deadlines":       "📅 Watcher Agent",
+        "zhs_registration":"🏃 Executor Agent",
         "elective_advice": "📚 Advisor Agent",
-        "exam_plan": "🧠 Learning Buddy",
-        "general": "💬 General Assistant",
-        "error": "⚠️ Error",
-        "": "",
+        "exam_plan":       "🧠 Learning Buddy",
+        "general":         "💬 General Assistant",
+        "error":           "⚠️ Error",
+        "":                "",
     }
     if st.session_state.last_agent:
         label = _AGENT_LABELS.get(st.session_state.last_agent, st.session_state.last_agent)
@@ -204,7 +472,7 @@ with tab_chat:
     if quick:
         user_input = quick
 
-    typed = st.chat_input("Ask TUM Pulse anything...")
+    typed = st.chat_input("Ask TUM Pulse anything…")
     if typed:
         user_input = typed
 
@@ -213,9 +481,10 @@ with tab_chat:
         with st.chat_message("user"):
             st.markdown(user_input)
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
+            with st.spinner("Thinking…"):
                 response, agent_called = orchestrator_run(
-                    user_input, thread_id=student_name or "default"
+                    user_input,
+                    thread_id=student_name or st.session_state.tum_username or "default",
                 )
             st.markdown(response)
             st.session_state.last_agent = agent_called
@@ -223,41 +492,34 @@ with tab_chat:
         st.rerun()
 
 # ===========================================================================
-# TAB 2 — Deadlines dashboard
+# TAB 2 — Deadlines
 # ===========================================================================
 
 with tab_deadlines:
-    st.header("Upcoming Deadlines")
-    st.caption("Pulls live data from TUMonline, Moodle, and Confluence.")
+    st.markdown(f"<h2 style='color:{TUM_DARK_BLUE};margin-bottom:4px'>📅 Upcoming Deadlines</h2>", unsafe_allow_html=True)
+    st.caption("Live data from TUMonline, Moodle, and Confluence.")
 
     col_btn, col_status = st.columns([2, 5])
-
     with col_btn:
-        refresh = st.button("🔄 Refresh from TUM systems", use_container_width=True)
+        refresh = st.button("🔄 Refresh from TUM systems", use_container_width=True, type="primary")
 
     if refresh:
-        with st.spinner("Logging in and scraping TUMonline, Moodle, Confluence..."):
+        with st.spinner("Logging in and scraping TUMonline, Moodle, Confluence…"):
             agent = WatcherAgent()
             agent.run()
             st.session_state.watcher_status = agent.status
             st.session_state.last_refreshed = datetime.now().strftime("%H:%M:%S")
-        st.success("Done!")
+        st.success("Refresh complete!")
         st.rerun()
 
     with col_status:
         if st.session_state.watcher_status:
-            _BADGE = {
-                "live":    ":green[● live]",
-                "mock":    ":orange[● mock]",
-                "skipped": ":gray[● skipped]",
-                "not run": ":gray[○ not run]",
-            }
-            status = st.session_state.watcher_status
-            badges = "  |  ".join(
-                f"**{src.title()}** {_BADGE.get(state, state)}"
-                for src, state in status.items()
-            )
-            st.markdown(badges)
+            _BADGE = {"live": "🟢 live", "mock": "🟠 mock", "skipped": "⚫ skipped", "not run": "⚫ not run"}
+            parts = [
+                f"**{src.title()}** — {_BADGE.get(state, state)}"
+                for src, state in st.session_state.watcher_status.items()
+            ]
+            st.markdown("   ·   ".join(parts))
             if st.session_state.last_refreshed:
                 st.caption(f"Last refreshed at {st.session_state.last_refreshed}")
 
@@ -267,8 +529,8 @@ with tab_deadlines:
     deadlines = db.get_upcoming_deadlines(days=120)
 
     if not deadlines:
-        st.info("No live deadlines stored yet. Hit **🔄 Refresh** to scrape your real TUM data.")
-        st.caption("Preview (mock data — not from your account):")
+        st.info("No deadlines cached yet — hit **🔄 Refresh** to pull your live TUM data.")
+        st.caption("Preview (mock data):")
         from tum_pulse.agents.watcher import _mock_tumonline, _mock_moodle
         deadlines = _mock_tumonline() + _mock_moodle()
         is_mock_preview = True
@@ -276,10 +538,9 @@ with tab_deadlines:
         is_mock_preview = False
 
     _SOURCE_ICON = {
-        "tumonline": "🏛️ TUMonline",
-        "moodle":    "📘 Moodle",
+        "tumonline":  "🏛️ TUMonline",
+        "moodle":     "📘 Moodle",
         "confluence": "📝 Wiki",
-        "pytest":    "🧪 Test",
     }
 
     rows = []
@@ -290,15 +551,15 @@ with tab_deadlines:
         except (ValueError, TypeError):
             days_left = 999
         urgency = (
-            "🔴 Today" if days_left == 0 else
-            "🟠 Tomorrow" if days_left == 1 else
+            "🔴 Today"        if days_left == 0 else
+            "🟠 Tomorrow"     if days_left == 1 else
             f"🟡 {days_left}d" if days_left <= 7 else
             f"🟢 {days_left}d"
         )
         rows.append({
-            "Date": dl.get("deadline_date", ""),
-            "Due": urgency,
-            "Title": dl["title"],
+            "Date":   dl.get("deadline_date", ""),
+            "Due":    urgency,
+            "Title":  dl["title"],
             "Course": dl.get("course", ""),
             "Source": _SOURCE_ICON.get(dl.get("source", ""), dl.get("source", "")),
         })
@@ -310,64 +571,56 @@ with tab_deadlines:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Date":   st.column_config.TextColumn("Date", width="small"),
-                "Due":    st.column_config.TextColumn("Due in", width="small"),
-                "Title":  st.column_config.TextColumn("Title", width="large"),
-                "Course": st.column_config.TextColumn("Course", width="medium"),
-                "Source": st.column_config.TextColumn("Source", width="small"),
+                "Date":   st.column_config.TextColumn("Date",    width="small"),
+                "Due":    st.column_config.TextColumn("Due in",  width="small"),
+                "Title":  st.column_config.TextColumn("Title",   width="large"),
+                "Course": st.column_config.TextColumn("Course",  width="medium"),
+                "Source": st.column_config.TextColumn("Source",  width="small"),
             },
         )
-        label = f"{len(deadlines)} deadline(s) shown"
-        if is_mock_preview:
-            label += " (preview only — hit Refresh to load your real data)"
-        else:
-            label += " — live from your TUM account ✅"
-        st.caption(label)
+        caption = f"{len(deadlines)} deadline(s)"
+        caption += " (preview — hit Refresh for real data)" if is_mock_preview else " from your TUM account ✅"
+        st.caption(caption)
 
     this_week = db.get_upcoming_deadlines(days=7) if not is_mock_preview else []
     if this_week:
-        st.subheader("This Week")
+        st.markdown(f"<h3 style='color:{TUM_DARK_BLUE};margin-top:24px'>This Week</h3>", unsafe_allow_html=True)
         for dl in this_week:
             try:
-                days_left = (
-                    datetime.strptime(dl["deadline_date"], "%Y-%m-%d").date()
-                    - datetime.now().date()
-                ).days
+                days_left = (datetime.strptime(dl["deadline_date"], "%Y-%m-%d").date() - datetime.now().date()).days
             except (ValueError, TypeError):
                 days_left = 999
             icon = "🔴" if days_left <= 1 else "🟠" if days_left <= 3 else "🟡"
             st.markdown(
-                f"{icon} **{dl['deadline_date']}** — {dl['title']}  "
-                f"<small style='color:grey'>{dl.get('course','')}</small>",
+                f"<div class='tum-card{' tum-card-orange' if days_left <= 1 else ''}'>"
+                f"{icon} <b>{dl['deadline_date']}</b> &nbsp;—&nbsp; {dl['title']}<br>"
+                f"<span style='color:#888;font-size:0.85rem'>{dl.get('course','')}</span></div>",
                 unsafe_allow_html=True,
             )
 
 # ===========================================================================
-# TAB 3 — ZHS Sports Registration
+# TAB 3 — ZHS Sports
 # ===========================================================================
 
 with tab_zhs:
-    st.header("🏃 ZHS Sport Registration")
-    st.caption(
-        "Search for sport courses at ZHS München and register directly. "
-        "Logs in with your TUM credentials via SSO."
-    )
+    st.markdown(f"<h2 style='color:{TUM_DARK_BLUE};margin-bottom:4px'>🏃 ZHS Sport Registration</h2>", unsafe_allow_html=True)
+    st.caption("Search and register for sport courses at ZHS München using your TUM SSO credentials.")
 
     col_search, col_btn = st.columns([4, 1])
     with col_search:
         sport_query = st.text_input(
-            "Sport / Activity",
-            placeholder="Badminton, Yoga, Schwimmen, Bouldern...",
+            "Sport",
+            placeholder="Badminton, Yoga, Schwimmen, Bouldern…",
             label_visibility="collapsed",
         )
     with col_btn:
-        do_search = st.button("🔍 Search", use_container_width=True)
+        do_search = st.button("🔍 Search", use_container_width=True, type="primary")
 
     if do_search and sport_query:
         from tum_pulse.connectors.zhs import ZHSConnector
         from tum_pulse.config import ZHS_USERNAME, ZHS_PASSWORD
 
-        with st.spinner(f"Logging into ZHS and searching for '{sport_query}'..."):
+        with st.spinner(f"Searching ZHS for '{sport_query}'…"):
             connector = ZHSConnector()
             result = connector.run(ZHS_USERNAME, ZHS_PASSWORD, sport_query, register_first=False)
 
@@ -377,7 +630,7 @@ with tab_zhs:
         st.session_state.zhs_reg_result = None
 
         if result["logged_in"]:
-            st.success(f"✅ Logged into ZHS | {result['message']}")
+            st.success(f"✅ Logged into ZHS — {result['message']}")
         else:
             st.error(f"❌ {result['message']}")
 
@@ -388,37 +641,38 @@ with tab_zhs:
         if not slots:
             st.info(f"No courses found for '{query}'. Try a different keyword.")
         else:
-            st.subheader(f"Found {len(slots)} slot(s) for '{query}'")
+            st.markdown(f"<h3 style='color:{TUM_DARK_BLUE}'>Found {len(slots)} slot(s) for '{query}'</h3>", unsafe_allow_html=True)
 
             for i, slot in enumerate(slots):
+                spots_color = "#1a7f37" if slot.spots_left > 5 else "#d97706" if slot.spots_left > 0 else "#cf222e"
                 with st.container():
-                    c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 1, 1])
-                    with c1:
-                        st.markdown(f"**{slot.title}**")
-                    with c2:
-                        st.caption(f"📍 {slot.location or '—'}")
-                    with c3:
-                        st.caption(f"🕐 {slot.day} {slot.time}" if slot.day or slot.time else "")
-                    with c4:
-                        spots_color = "🟢" if slot.spots_left > 5 else "🟠" if slot.spots_left > 0 else "🔴"
-                        st.caption(f"{spots_color} {slot.spots_left} spots")
-                    with c5:
-                        if st.button("Buchen", key=f"book_{i}", use_container_width=True):
-                            from tum_pulse.connectors.zhs import ZHSConnector
-                            from tum_pulse.config import ZHS_USERNAME, ZHS_PASSWORD
-                            from playwright.sync_api import sync_playwright
+                    st.markdown(f"""
+                    <div class='tum-card' style='display:flex;justify-content:space-between;align-items:center'>
+                        <div>
+                            <b style='font-size:1rem'>{slot.title}</b><br>
+                            <span style='color:#666;font-size:0.85rem'>📍 {slot.location or "—"} &nbsp;·&nbsp; 🕐 {slot.day or ""} {slot.time or ""}</span>
+                        </div>
+                        <div style='text-align:right'>
+                            <span style='color:{spots_color};font-weight:700'>{slot.spots_left} spots</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-                            with st.spinner(f"Registering for {slot.title}..."):
-                                with sync_playwright() as pw:
-                                    browser = pw.chromium.launch(headless=True)
-                                    page = browser.new_page()
-                                    c = ZHSConnector()
-                                    c.login(page, ZHS_USERNAME, ZHS_PASSWORD)
-                                    reg = c.register(page, slot)
-                                    browser.close()
-                                st.session_state.zhs_reg_result = reg
-                            st.rerun()
-                    st.divider()
+                    if st.button("📌 Buchen", key=f"book_{i}", use_container_width=False):
+                        from tum_pulse.connectors.zhs import ZHSConnector
+                        from tum_pulse.config import ZHS_USERNAME, ZHS_PASSWORD
+                        from playwright.sync_api import sync_playwright
+
+                        with st.spinner(f"Registering for {slot.title}…"):
+                            with sync_playwright() as pw:
+                                browser = pw.chromium.launch(headless=True)
+                                page = browser.new_page()
+                                _zc = ZHSConnector()
+                                _zc.login(page, ZHS_USERNAME, ZHS_PASSWORD)
+                                reg = _zc.register(page, slot)
+                                browser.close()
+                            st.session_state.zhs_reg_result = reg
+                        st.rerun()
 
         if st.session_state.zhs_reg_result:
             reg = st.session_state.zhs_reg_result
@@ -427,80 +681,83 @@ with tab_zhs:
             else:
                 st.warning(f"⚠️ {reg['message']}")
             if reg.get("screenshot"):
-                st.image(reg["screenshot"], caption="ZHS page after registration attempt", use_column_width=True)
+                st.image(reg["screenshot"], caption="ZHS confirmation", use_column_width=True)
 
     st.divider()
-    st.markdown("""
-**How it works:**
-1. TUM Pulse logs into `kurse.zhs-muenchen.de` using your TUM SSO credentials
-2. Searches for available sport courses matching your query
-3. You can book directly with one click — confirmation sent to your TUM email
-
-> ZHS login uses the same TUM username/password as TUMonline and Moodle.
-""")
+    st.markdown(f"""
+    <div class='tum-card'>
+        <b style='color:{TUM_DARK_BLUE}'>How it works</b><br><br>
+        1. TUM Pulse logs into <code>kurse.zhs-muenchen.de</code> with your TUM SSO credentials<br>
+        2. Searches available sport courses matching your query<br>
+        3. Click <b>Buchen</b> to register — confirmation sent to your TUM email
+    </div>
+    """, unsafe_allow_html=True)
 
 # ===========================================================================
 # TAB 4 — About
 # ===========================================================================
 
 with tab_about:
-    st.header("About TUM Pulse 🎓")
+    st.markdown(f"<h2 style='color:{TUM_DARK_BLUE}'>About TUM Pulse 🎓</h2>", unsafe_allow_html=True)
 
     col_left, col_right = st.columns(2)
 
     with col_left:
-        st.subheader("What is TUM Pulse?")
-        st.markdown("""
-TUM Pulse is your AI-powered Campus Co-Pilot for TU Munich. It brings together
-all your academic information and automates repetitive tasks through a single
-conversational interface.
-
-**Agents:**
-- 📅 **Watcher Agent** — scrapes TUMonline, Moodle & Confluence for deadlines
-- 🏃 **Executor Agent** — automates ZHS sport registration via Playwright
-- 📚 **Advisor Agent** — recommends electives using semantic similarity (Titan Embeddings)
-- 🧠 **Learning Buddy** — creates personalised exam prep plans
-- 💬 **General Assistant** — answers any TUM-related question
-        """)
+        st.markdown(f"""
+        <div class='tum-card'>
+            <b style='color:{TUM_DARK_BLUE};font-size:1.05rem'>What is TUM Pulse?</b><br><br>
+            TUM Pulse is your AI-powered Campus Co-Pilot for TU Munich. It connects your
+            academic systems and automates repetitive tasks through one conversational interface.<br><br>
+            <b>Agents</b><br>
+            📅 <b>Watcher</b> — scrapes TUMonline, Moodle & Confluence for deadlines<br>
+            🏃 <b>Executor</b> — automates ZHS sport registration via Playwright<br>
+            📚 <b>Advisor</b> — recommends electives via Titan Embeddings<br>
+            🧠 <b>Learning Buddy</b> — personalised exam prep plans<br>
+            💬 <b>General</b> — answers any TUM-related question
+        </div>
+        """, unsafe_allow_html=True)
 
     with col_right:
-        st.subheader("Tech Stack")
-        st.markdown("""
-| Layer | Technology |
-|---|---|
-| LLM | Amazon Bedrock (Claude Sonnet) |
-| Embeddings | Amazon Titan Embed v2 |
-| Orchestration | LangGraph |
-| Browser automation | Playwright (sync) |
-| Storage | SQLite (local) |
-| UI | Streamlit |
-| TUM Auth | Keycloak + Shibboleth SSO |
-| Moodle API | AJAX calendar endpoint |
-| ZHS | Ory Kratos + TUM SSO |
-        """)
+        st.markdown(f"""
+        <div class='tum-card'>
+            <b style='color:{TUM_DARK_BLUE};font-size:1.05rem'>Tech Stack</b><br><br>
+            🤖 <b>LLM</b> — Amazon Bedrock (Claude Sonnet)<br>
+            🔢 <b>Embeddings</b> — Amazon Titan Embed v2<br>
+            🔗 <b>Orchestration</b> — LangGraph<br>
+            🌐 <b>Browser</b> — Playwright (sync)<br>
+            🗄️ <b>Storage</b> — SQLite (local)<br>
+            🖥️ <b>UI</b> — Streamlit<br>
+            🔐 <b>TUM Auth</b> — Keycloak + Shibboleth SSO<br>
+            📘 <b>Moodle</b> — AJAX calendar API<br>
+            🏃 <b>ZHS</b> — Ory Kratos + TUM SSO
+        </div>
+        """, unsafe_allow_html=True)
 
     st.divider()
-    st.subheader("Data Flow")
-    st.markdown("""
-```
+
+    st.markdown(f"""
+    <div class='tum-card'>
+        <b style='color:{TUM_DARK_BLUE};font-size:1.05rem'>Data Flow</b><br><br>
+        <pre style='background:#f5f7fa;border-radius:8px;padding:12px;font-size:0.82rem'>
 User Query
     │
     ▼
 Orchestrator (LangGraph) ──► Intent Classification (Claude)
     │
-    ├── deadlines ──► WatcherAgent ──► TUMonlineConnector + MoodleConnector ──► SQLite
+    ├── deadlines        ──► WatcherAgent  ──► TUMonline + Moodle + Confluence ──► SQLite
     ├── zhs_registration ──► ExecutorAgent ──► ZHSConnector ──► kurse.zhs-muenchen.de
-    ├── elective_advice ──► AdvisorAgent ──► Titan Embeddings ──► Claude
-    └── exam_plan ──► LearningBuddyAgent ──► Claude
-```
-    """)
+    ├── elective_advice  ──► AdvisorAgent  ──► Titan Embeddings ──► Claude
+    └── exam_plan        ──► LearningBuddy ──► Claude
+        </pre>
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.subheader("Source status")
+    st.markdown(f"<h3 style='color:{TUM_DARK_BLUE}'>Connected Services</h3>", unsafe_allow_html=True)
     status_data = {
-        "TUMonline": ["campus.tum.de", "Keycloak → Shibboleth", "wbEeHooks.showHooks"],
-        "Moodle": ["moodle.tum.de", "Shibboleth SSO", "AJAX calendar API"],
-        "Confluence": ["collab.dvb.bayern", "Username + Password", "CQL search"],
-        "ZHS": ["kurse.zhs-muenchen.de", "Ory Kratos + TUM SSO", "MeiliSearch API"],
+        "TUMonline":  ["campus.tum.de",          "Keycloak → Shibboleth SSO", "CAMPUSonline REST API"],
+        "Moodle":     ["moodle.tum.de",           "Shibboleth SSO",            "AJAX calendar endpoint"],
+        "Confluence": ["collab.dvb.bayern",       "Personal Access Token",     "CQL search"],
+        "ZHS":        ["kurse.zhs-muenchen.de",   "Ory Kratos + TUM SSO",     "MeiliSearch API"],
     }
     df_about = pd.DataFrame(status_data, index=["URL", "Auth", "Data source"]).T
     df_about.index.name = "Service"
