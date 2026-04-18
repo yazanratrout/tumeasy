@@ -1,4 +1,10 @@
-"""WatcherAgent: scrapes TUMonline (via NAT REST API) and Moodle for deadlines."""
+"""WatcherAgent — scrapes TUMonline, Moodle, and Confluence for deadlines.
+
+Scraper hierarchy per source:
+  TUMonline  → NAT REST API (public, no auth) → TUMonlineConnector (Playwright/Shibboleth) → mock
+  Moodle     → MoodleConnector (Shibboleth + AJAX API) → MoodleScraper (Playwright) → mock
+  Confluence → atlassian-python-api → skipped (not a hard error)
+"""
 
 import sqlite3
 import time
@@ -7,29 +13,69 @@ from typing import Any
 
 import requests
 
-from tum_pulse.config import DB_PATH, TUM_USERNAME
+from tum_pulse.config import (
+    CONFLUENCE_PASSWORD,
+    CONFLUENCE_SPACE,
+    CONFLUENCE_URL,
+    CONFLUENCE_USERNAME,
+    DB_PATH,
+    TUM_PASSWORD,
+    TUM_USERNAME,
+)
 from tum_pulse.memory.database import SQLiteMemory
 
 TUM_API_BASE = "https://api.srv.nat.tum.de"
 
 
+# ---------------------------------------------------------------------------
+# Module-level mock functions (importable by main.py for preview)
+# ---------------------------------------------------------------------------
+
+def _mock_tumonline() -> list[dict]:
+    today = datetime.now()
+    return [
+        {"title": "Exam Registration: Analysis 2", "course": "Analysis 2",
+         "deadline_date": (today + timedelta(days=3)).strftime("%Y-%m-%d"), "source": "tumonline"},
+        {"title": "Homework Sheet 5 Submission", "course": "Algorithms and Data Structures",
+         "deadline_date": (today + timedelta(days=5)).strftime("%Y-%m-%d"), "source": "tumonline"},
+        {"title": "Lab Report 2", "course": "Practical Course: Machine Learning",
+         "deadline_date": (today + timedelta(days=10)).strftime("%Y-%m-%d"), "source": "tumonline"},
+    ]
+
+
+def _mock_moodle() -> list[dict]:
+    today = datetime.now()
+    return [
+        {"title": "Quiz: Probability Theory Chapter 3", "course": "Introduction to Probability",
+         "deadline_date": (today + timedelta(days=2)).strftime("%Y-%m-%d"), "source": "moodle"},
+        {"title": "Project Milestone 1", "course": "Software Engineering",
+         "deadline_date": (today + timedelta(days=7)).strftime("%Y-%m-%d"), "source": "moodle"},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# WatcherAgent
+# ---------------------------------------------------------------------------
+
 class WatcherAgent:
-    """Monitors TUMonline and Moodle for upcoming deadlines and saves them to SQLite."""
+    """Monitors TUMonline, Moodle, and Confluence for upcoming deadlines."""
 
     def __init__(self) -> None:
         """Initialise with the shared SQLite memory layer."""
         self.db = SQLiteMemory()
+        self.status: dict[str, str] = {
+            "tumonline": "not run",
+            "moodle":    "not run",
+            "confluence": "not run",
+        }
+        self._last_enrolled_courses: list[str] = []
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _get_current_semester_key(self) -> str | None:
-        """Return the semester_key for the currently active semester.
-
-        Returns:
-            Semester key string (e.g. '2026s') or None if the API is unreachable.
-        """
+        """Return the semester_key for the currently active semester."""
         resp = requests.get(
             f"{TUM_API_BASE}/api/v1/semesters",
             params={"limit": 200},
@@ -41,21 +87,12 @@ class WatcherAgent:
         return current["semester_key"] if current else None
 
     def _get_enrolled_courses(self) -> list[str]:
-        """Fetch the student's currently enrolled courses from TUM NAT API.
+        """Fetch enrolled courses: try TUM API → SQLite profile → empty list.
 
-        Tries the following in order:
-        1. GET /api/v1/students/{username} — authenticated endpoint; 401s without
-           a Bearer token but worth attempting in case an API key is configured.
-        2. GET /api/v1/course/events with semester_key — events carry course names.
-        3. SQLite profile key "courses" — set by the sidebar profile editor or a
-           previous successful fetch.
-        4. Empty list — disables enrollment filtering so all deadlines are shown.
-
-        On a successful API fetch, saves the result to SQLite so the sidebar
-        profile stays in sync automatically.
+        Saves to SQLite on a successful API fetch so the sidebar stays in sync.
 
         Returns:
-            List of course name strings from the student's enrollment.
+            List of course name strings.
         """
         # --- 1. Authenticated student endpoint ---
         try:
@@ -66,7 +103,6 @@ class WatcherAgent:
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    # Student record may contain a "courses" or "study" list
                     raw_courses: list = (
                         data.get("courses")
                         or data.get("study", {}).get("courses", [])
@@ -114,20 +150,19 @@ class WatcherAgent:
         try:
             saved = self.db.get_profile("courses")
             if saved and isinstance(saved, list):
-                print(f"[WatcherAgent] Using saved profile courses (API unavailable)")
+                print("[WatcherAgent] Using saved profile courses (API unavailable)")
                 return saved
         except Exception:
             pass
 
-        # --- 4. Empty — no filtering ---
         print("[WatcherAgent] No enrolled courses found — deadlines will not be filtered")
         return []
 
     def _filter_by_enrollment(self, deadlines: list[dict], enrolled: list[str]) -> list[dict]:
         """Filter deadlines to those relevant to enrolled courses.
 
-        Always keeps global exam-period deadline rows. Skips filtering entirely
-        when *enrolled* is empty so no deadlines are hidden.
+        Always keeps global exam-period deadline rows. Skips filtering when
+        *enrolled* is empty. Excludes generic academic prefix words from keywords.
 
         Args:
             deadlines: Full list of deadline dicts.
@@ -139,7 +174,6 @@ class WatcherAgent:
         if not enrolled:
             return deadlines
 
-        # Words that appear in many course names but don't identify a specific subject
         _GENERIC_WORDS = {
             "introduction", "advanced", "applied", "practical", "principles",
             "fundamentals", "basics", "overview", "seminar", "lecture",
@@ -149,7 +183,7 @@ class WatcherAgent:
         keywords: set[str] = set()
         for name in enrolled:
             for word in name.split():
-                w = word.lower().rstrip("0123456789")  # strip trailing digits e.g. "Analysis2"
+                w = word.lower().rstrip("0123456789")
                 if len(w) > 3 and w not in _GENERIC_WORDS:
                     keywords.add(w)
 
@@ -169,19 +203,14 @@ class WatcherAgent:
         return filtered
 
     # ------------------------------------------------------------------
-    # Scrapers
+    # Scrapers — TUMonline
     # ------------------------------------------------------------------
 
     def scrape_tumonline(self) -> list[dict]:
-        """Return deadline data from the TUM NAT public REST API.
+        """Return deadline data from the TUM NAT public REST API (primary path).
 
-        Fetches two data sources:
-        1. Exam-period registration deadlines for the current semester
-           (``/api/v1/semesters/examperiods``).
-        2. Per-exam registration close dates whose deadline falls within the
-           next 60 days (``/api/v1/exam/date``).
-
-        Falls back to mock data if the API is unreachable or returns an error.
+        Fetches exam-period registration deadlines and per-exam registration
+        close dates within 60 days. Falls back to mock on any error.
 
         Returns:
             List of deadline dicts with keys: title, course, deadline_date, source.
@@ -273,92 +302,155 @@ class WatcherAgent:
                     "deadline_date": reg_end.strftime("%Y-%m-%d"),
                     "source": "tumonline",
                 })
-                print(f"[WatcherAgent]   Exam reg: {course_name} → {reg_end.strftime('%Y-%m-%d')}")
 
-            print(f"[WatcherAgent] TUMonline: fetched {len(deadlines)} deadline(s) before filtering")
+            print(f"[WatcherAgent] TUMonline NAT API: {len(deadlines)} deadline(s) before filtering")
             deadlines = self._filter_by_enrollment(deadlines, enrolled_courses)
+            self.status["tumonline"] = "live" if deadlines else "mock"
             return deadlines
 
         except Exception as exc:
-            print(f"[WatcherAgent] TUMonline API failed ({exc}) — Using MOCK data")
+            print(f"[WatcherAgent] TUMonline NAT API failed ({exc}) — will try Playwright fallback")
             self._last_enrolled_courses = []
-            return self._mock_tumonline()
+            self.status["tumonline"] = "mock"
+            return []
+
+    def scrape_tumonline_playwright(self) -> list[dict]:
+        """Secondary TUMonline scraper: Playwright login to campus.tum.de.
+
+        Called by run() only when the NAT REST API returns 0 results.
+        Uses TUMonlineConnector (Keycloak → Shibboleth login + wbEeHooks).
+
+        Returns:
+            List of deadline dicts, or mock data on failure.
+        """
+        try:
+            from tum_pulse.connectors.tumonline import TUMonlineConnector
+            print("[WatcherAgent] Trying TUMonlineConnector (Playwright) ...")
+            results = TUMonlineConnector().scrape(TUM_USERNAME, TUM_PASSWORD)
+            if results:
+                print(f"[WatcherAgent] TUMonlineConnector: {len(results)} deadline(s)")
+                self.status["tumonline"] = "live"
+                return results
+            self.status["tumonline"] = "mock"
+            return _mock_tumonline()
+        except Exception as exc:
+            print(f"[WatcherAgent] TUMonlineConnector failed ({exc}) — Using MOCK data")
+            self.status["tumonline"] = "mock"
+            return _mock_tumonline()
+
+    # ------------------------------------------------------------------
+    # Scrapers — Moodle
+    # ------------------------------------------------------------------
+
+    def scrape_moodle_ajax(self) -> list[dict]:
+        """Fetch Moodle deadlines via Shibboleth SSO + AJAX calendar API (primary).
+
+        Uses MoodleConnector which calls core_calendar_get_action_events_by_timesort.
+
+        Returns:
+            List of deadline dicts.
+
+        Raises:
+            Exception: propagated so scrape_moodle() can fall back.
+        """
+        from tum_pulse.connectors.moodle import MoodleConnector
+        print("[WatcherAgent] Trying MoodleConnector (AJAX) ...")
+        results = MoodleConnector().scrape(TUM_USERNAME, TUM_PASSWORD)
+        print(f"[WatcherAgent] MoodleConnector: {len(results)} deadline(s)")
+        return results
 
     def scrape_moodle(self) -> list[dict]:
-        """Return deadline data scraped from Moodle via Playwright SSO login.
-
-        Instantiates MoodleScraper, logs in, and fetches calendar deadlines.
-        Falls back to mock data if the scraper raises an exception.
+        """Return Moodle deadlines: AJAX connector → Playwright DOM → mock.
 
         Returns:
             List of deadline dicts with keys: title, course, deadline_date, source.
         """
+        # --- 1. AJAX API via MoodleConnector (best quality data) ---
+        try:
+            results = self.scrape_moodle_ajax()
+            self.status["moodle"] = "live"
+            return results
+        except Exception as exc:
+            print(f"[WatcherAgent] MoodleConnector failed ({exc}) — trying MoodleScraper ...")
+
+        # --- 2. Playwright DOM parsing via MoodleScraper (yazan fallback) ---
         try:
             from tum_pulse.tools.moodle_scraper import MoodleScraper
             scraper = MoodleScraper()
             deadlines = scraper.get_deadlines_from_calendar()
-            print(f"[WatcherAgent] Moodle: fetched {len(deadlines)} deadline(s)")
+            print(f"[WatcherAgent] MoodleScraper: {len(deadlines)} deadline(s)")
+            self.status["moodle"] = "live"
             return deadlines
         except Exception as exc:
-            print(f"[WatcherAgent] Moodle scrape failed ({exc}) — Using MOCK data")
-            return self._mock_moodle()
+            print(f"[WatcherAgent] MoodleScraper failed ({exc}) — Using MOCK data")
+            self.status["moodle"] = "mock"
+            return _mock_moodle()
 
     # ------------------------------------------------------------------
-    # Mock fallbacks (kept so the app works without credentials)
+    # Scrapers — Confluence
     # ------------------------------------------------------------------
 
-    def _mock_tumonline(self) -> list[dict]:
-        """Return hardcoded mock TUMonline deadlines."""
-        today = datetime.now()
-        return [
-            {
-                "title": "Exam Registration: Analysis 2",
-                "course": "Analysis 2",
-                "deadline_date": (today + timedelta(days=3)).strftime("%Y-%m-%d"),
-                "source": "tumonline",
-            },
-            {
-                "title": "Homework Sheet 5 Submission",
-                "course": "Algorithms and Data Structures",
-                "deadline_date": (today + timedelta(days=5)).strftime("%Y-%m-%d"),
-                "source": "tumonline",
-            },
-            {
-                "title": "Lab Report 2",
-                "course": "Practical Course: Machine Learning",
-                "deadline_date": (today + timedelta(days=10)).strftime("%Y-%m-%d"),
-                "source": "tumonline",
-            },
-        ]
+    def scrape_confluence(self) -> list[dict]:
+        """Search Confluence/Collab Wiki for deadline-related pages.
 
-    def _mock_moodle(self) -> list[dict]:
-        """Return hardcoded mock Moodle deadlines."""
-        today = datetime.now()
-        return [
-            {
-                "title": "Quiz: Probability Theory Chapter 3",
-                "course": "Introduction to Probability",
-                "deadline_date": (today + timedelta(days=2)).strftime("%Y-%m-%d"),
-                "source": "moodle",
-            },
-            {
-                "title": "Project Milestone 1",
-                "course": "Software Engineering",
-                "deadline_date": (today + timedelta(days=7)).strftime("%Y-%m-%d"),
-                "source": "moodle",
-            },
-        ]
+        Uses atlassian-python-api CQL search. Skipped (returns []) rather than
+        raising if Confluence is unreachable or not configured.
+
+        Returns:
+            List of deadline dicts, or [] if Confluence is skipped.
+        """
+        try:
+            from atlassian import Confluence
+            from tum_pulse.connectors.tumonline import parse_date as _parse_date
+
+            confluence = Confluence(
+                url=CONFLUENCE_URL,
+                username=CONFLUENCE_USERNAME,
+                password=CONFLUENCE_PASSWORD,
+                timeout=20,
+            )
+            space_filter = f"AND space = '{CONFLUENCE_SPACE}'" if CONFLUENCE_SPACE else ""
+            cql = (
+                f"text ~ 'deadline OR exam OR Abgabe OR Prüfung' "
+                f"{space_filter} ORDER BY lastmodified DESC"
+            )
+            results = confluence.cql(cql, limit=20).get("results", [])
+
+            deadlines: list[dict] = []
+            today = datetime.now()
+            for result in results:
+                title = result.get("title", "")
+                excerpt = result.get("excerpt", "")
+                url = result.get("url", "")
+                self.db.save_content("confluence", url, f"{title}\n{excerpt}")
+                date_str = _parse_date(excerpt) or _parse_date(title)
+                if date_str:
+                    try:
+                        if datetime.strptime(date_str, "%Y-%m-%d") >= today:
+                            deadlines.append({
+                                "title": title,
+                                "course": "",
+                                "deadline_date": date_str,
+                                "source": "confluence",
+                            })
+                    except ValueError:
+                        pass
+
+            self.status["confluence"] = "live"
+            print(f"[WatcherAgent] Confluence: {len(deadlines)} deadline(s)")
+            return deadlines
+
+        except Exception as exc:
+            print(f"[WatcherAgent] Confluence skipped: {exc}")
+            self.status["confluence"] = "skipped"
+            return []
 
     # ------------------------------------------------------------------
     # Alerts
     # ------------------------------------------------------------------
 
     def check_and_create_alerts(self) -> int:
-        """Create alerts for deadlines within the next 2 days, skipping duplicates.
-
-        Queries get_upcoming_deadlines(days=2), checks the alerts table for
-        any existing row with the same message to avoid duplicates (both sent
-        and unsent), then calls create_alert() for any new ones.
+        """Create alerts for deadlines within 2 days, skipping duplicates.
 
         Returns:
             Number of new alert rows created.
@@ -397,28 +489,46 @@ class WatcherAgent:
     # ------------------------------------------------------------------
 
     def run(self) -> str:
-        """Scrape all sources, persist to DB, return human-readable summary.
+        """Scrape all sources, persist to SQLite, return human-readable summary.
+
+        TUMonline: NAT REST API first; falls back to Playwright connector if empty.
+        Moodle: AJAX connector first; falls back to DOM scraper, then mock.
+        Confluence: best-effort; silently skipped on failure.
 
         Returns:
-            A formatted string listing all newly saved deadlines.
+            Formatted string listing all deadlines found.
         """
         all_deadlines: list[dict] = []
-        self._last_enrolled_courses: list[str] = []
+        self._last_enrolled_courses = []
 
+        # TUMonline — NAT API primary, Playwright secondary
         try:
-            tumonline_deadlines = self.scrape_tumonline()
-            all_deadlines.extend(tumonline_deadlines)
-            if self._last_enrolled_courses:
-                self.db.save_profile("courses", self._last_enrolled_courses)
+            nat_deadlines = self.scrape_tumonline()
+            if nat_deadlines:
+                all_deadlines.extend(nat_deadlines)
+                if self._last_enrolled_courses:
+                    self.db.save_profile("courses", self._last_enrolled_courses)
+            else:
+                pw_deadlines = self.scrape_tumonline_playwright()
+                all_deadlines.extend(pw_deadlines)
         except Exception as exc:
             print(f"[WatcherAgent] TUMonline scrape error: {exc}")
 
+        # Moodle
         try:
             moodle_deadlines = self.scrape_moodle()
             all_deadlines.extend(moodle_deadlines)
         except Exception as exc:
             print(f"[WatcherAgent] Moodle scrape error: {exc}")
 
+        # Confluence (best-effort)
+        try:
+            confluence_deadlines = self.scrape_confluence()
+            all_deadlines.extend(confluence_deadlines)
+        except Exception as exc:
+            print(f"[WatcherAgent] Confluence scrape error: {exc}")
+
+        # Persist to SQLite (INSERT OR IGNORE deduplication)
         for dl in all_deadlines:
             self.db.save_deadline(
                 title=dl["title"],
@@ -432,16 +542,17 @@ class WatcherAgent:
 
         lines = [f"Found {len(all_deadlines)} deadline(s):\n"]
         for dl in sorted(all_deadlines, key=lambda x: x["deadline_date"]):
-            lines.append(f"  • [{dl['deadline_date']}] {dl['title']} ({dl['course']})")
+            src = self.status.get(dl["source"], "")
+            tag = "✅" if src == "live" else "📋"
+            lines.append(f"  {tag} [{dl['deadline_date']}] {dl['title']} ({dl['course'] or dl['source']})")
 
         self.check_and_create_alerts()
         return "\n".join(lines)
 
     def get_this_week(self) -> str:
-        """Return a formatted list of deadlines in the next 7 days.
+        """Return filtered upcoming deadlines in the next 7 days.
 
-        Applies enrollment filtering so only courses the student is enrolled in
-        are shown. Falls back to all deadlines when no enrollment data is saved.
+        Applies enrollment filtering so only the student's own courses are shown.
 
         Returns:
             Human-readable string of upcoming deadlines.
@@ -451,7 +562,7 @@ class WatcherAgent:
         deadlines = self._filter_by_enrollment(deadlines, enrolled_courses)
 
         if not deadlines:
-            return "No deadlines in the next 7 days. "
+            return "No deadlines in the next 7 days."
 
         lines = ["**Upcoming deadlines (next 7 days):**\n"]
         for dl in deadlines:
@@ -463,32 +574,25 @@ if __name__ == "__main__":
     agent = WatcherAgent()
 
     print("=" * 60)
-    print("TEST: scrape_tumonline() — real TUM NAT API")
+    print("TEST: scrape_tumonline() — NAT REST API")
     print("=" * 60)
-    try:
-        tum_deadlines = agent.scrape_tumonline()
-        print(f"\nReturned {len(tum_deadlines)} deadline(s):")
-        for d in tum_deadlines:
-            print(f"  [{d['deadline_date']}] {d['title']}")
-    except Exception as e:
-        print(f"Error: {e}")
+    tum = agent.scrape_tumonline()
+    print(f"Returned {len(tum)} deadline(s)")
+    for d in tum[:5]:
+        print(f"  [{d['deadline_date']}] {d['title']}")
 
     print()
     print("=" * 60)
-    print("TEST: scrape_moodle() — Playwright SSO")
+    print("TEST: scrape_moodle()")
     print("=" * 60)
-    try:
-        moodle_deadlines = agent.scrape_moodle()
-        print(f"\nReturned {len(moodle_deadlines)} deadline(s):")
-        for d in moodle_deadlines:
-            print(f"  [{d['deadline_date']}] {d['title']}")
-    except Exception as e:
-        print(f"Error: {e}")
+    moodle = agent.scrape_moodle()
+    print(f"Returned {len(moodle)} deadline(s)")
 
     print()
     print("=" * 60)
-    print("TEST: full run() + this week")
+    print("TEST: full run()")
     print("=" * 60)
     print(agent.run())
+    print("\nStatus:", agent.status)
     print()
     print(agent.get_this_week())
