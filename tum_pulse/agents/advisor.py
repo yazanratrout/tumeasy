@@ -549,6 +549,8 @@ class AdvisorAgent:
         """
         profile: dict = {}
 
+        selected_grades = self.db.get_profile("selected_recommendation_grades") or {}
+        selected_courses = self.db.get_profile("selected_recommendation_courses") or []
         saved_grades = self.db.get_profile("grades")
         saved_courses = self.db.get_profile("courses") or self.db.get_profile("enrolled")
 
@@ -569,10 +571,13 @@ class AdvisorAgent:
             except Exception as exc:
                 print(f"[AdvisorAgent] Fresh fetch failed: {exc}")
 
-        if saved_grades:
-            profile["grades"] = saved_grades
-        if saved_courses:
-            profile["courses"] = saved_courses
+        active_grades = selected_grades if selected_courses else (saved_grades or {})
+        active_courses = selected_courses if selected_courses else (saved_courses or [])
+
+        if active_grades:
+            profile["grades"] = active_grades
+        if active_courses:
+            profile["courses"] = active_courses
 
         if not profile:
             profile = {
@@ -590,7 +595,12 @@ class AdvisorAgent:
             if len(self.electives) > 15
             else "_(Using sample elective catalogue)_\n\n"
         )
-        lines = ["**Elective Course Recommendations for You:**\n\n" + source_note]
+        selection_note = (
+            f"_(Recommendations currently use only your selected courses: {', '.join(selected_courses)})_\n\n"
+            if selected_courses
+            else "_(No specific courses selected, so recommendations use your full saved course history.)_\n\n"
+        )
+        lines = ["**Elective Course Recommendations for You:**\n\n" + source_note + selection_note]
 
         for i, rec in enumerate(recommendations, 1):
             el = rec["elective"]
