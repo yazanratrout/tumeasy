@@ -151,38 +151,48 @@ class WatcherAgent:
     def _filter_by_enrollment(
         self, deadlines: list[dict], enrolled: list[str]
     ) -> list[dict]:
-        """Filter deadlines to only those matching the student's enrolled courses.
+        """Filter deadlines to only those matching the student's exact
+        enrolled course names from Moodle/TUMonline.
 
-        Always keeps global exam-period deadline rows.
-        Skips filtering when enrolled is empty.
+        Uses exact substring matching — the enrolled course name must
+        appear verbatim inside the deadline title or course field.
+        Always keeps global exam-period deadlines and Moodle deadlines.
 
         Args:
             deadlines: Full list of deadline dicts.
-            enrolled: List of enrolled course name strings.
+            enrolled: Exact course name strings from the student's profile.
 
         Returns:
-            Filtered (or original) list of deadline dicts.
+            Filtered list of relevant deadlines.
         """
         if not enrolled:
             return deadlines
 
-        kws: set[str] = set()
-        for name in enrolled:
-            for word in name.split():
-                w = word.lower().rstrip("0123456789")
-                if len(w) > 3 and w not in _GENERIC_WORDS:
-                    kws.add(w)
+        enrolled_lower = [c.lower().strip() for c in enrolled if c.strip()]
 
-        filtered = [
-            d for d in deadlines
-            if d["title"].startswith("Exam Registration") or
-            any(kw in (d["title"] + " " + d.get("course", "")).lower() for kw in kws)
-        ]
+        def _matches(deadline: dict) -> bool:
+            text = (
+                deadline.get("title", "") + " " +
+                deadline.get("course", "")
+            ).lower()
+            return any(course in text for course in enrolled_lower)
+
+        filtered = []
+        for dl in deadlines:
+            if dl.get("title", "").startswith("Exam Registration Deadline"):
+                filtered.append(dl)
+                continue
+
+            if dl.get("source") == "moodle":
+                filtered.append(dl)
+                continue
+
+            if _matches(dl):
+                filtered.append(dl)
 
         print(
-            f"[WatcherAgent] Enrollment filter: "
-            f"{len(deadlines)} → {len(filtered)} deadline(s) "
-            f"({len(enrolled)} enrolled courses, {len(kws)} keywords)"
+            f"[WatcherAgent] Exact enrollment filter: "
+            f"{len(deadlines)} → {len(filtered)} deadline(s)"
         )
         return filtered
 
