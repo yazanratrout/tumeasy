@@ -73,38 +73,82 @@ class LearningBuddyAgent:
         search_name = best_known or course_name
         print(f"[LearningBuddy] Looking for Moodle course: '{search_name}'")
 
+        all_known = self.db.get_profile("courses") or []
+        all_known_lower = [c.lower() for c in all_known]
+
         # Scrape /my/courses.php — definitive list of enrolled courses with IDs
         try:
             page.goto(f"{MOODLE_BASE_URL}/my/courses.php", timeout=15_000)
             page.wait_for_load_state("networkidle", timeout=10_000)
             page.wait_for_timeout(1000)
 
-            course_links = page.evaluate("""() => {
-                return Array.from(document.querySelectorAll('a[href*="course/view.php"]')).map(a => ({
-                    href: a.href,
-                    text: a.textContent.trim()
-                }));
+            # Scroll to load lazy-loaded courses
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1500)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1000)
+
+            # Click "Load more" if present
+            try:
+                load_more = page.locator(
+                    "button:has-text('Mehr'), button:has-text('Load more'), "
+                    "[data-action='load-more']"
+                ).first
+                if load_more.is_visible(timeout=2000):
+                    load_more.click()
+                    page.wait_for_timeout(1500)
+            except Exception:
+                pass
+
+            # Get all course links — deduplicate by course ID
+            course_links_raw = page.evaluate("""() => {
+                const seen = new Set();
+                const results = [];
+                document.querySelectorAll('a[href*="course/view.php"]').forEach(a => {
+                    const href = a.href;
+                    const text = a.textContent.trim().replace(/\\s+/g, ' ');
+                    if (!text || text.length < 3) return;
+                    if (text.includes('Favorit') || text.includes('favorite')) return;
+                    const m = href.match(/course\\/view\\.php\\?id=(\\d+)/);
+                    if (!m) return;
+                    const id = m[1];
+                    const key = id + '|' + text.substring(0, 30);
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        results.push({href, text});
+                    }
+                });
+                return results;
             }""")
 
-            print(f"[LearningBuddy] Found {len(course_links)} enrolled courses on Moodle:")
+            # Keep longest text per course ID
+            seen_ids: dict[str, dict] = {}
+            for link in course_links_raw:
+                m = re.search(r"course/view\.php\?id=(\d+)", link["href"])
+                if not m:
+                    continue
+                cid = m.group(1)
+                text = link["text"].strip()
+                if cid not in seen_ids or len(text) > len(seen_ids[cid]["text"]):
+                    seen_ids[cid] = {"href": link["href"], "text": text}
+
+            course_links = list(seen_ids.values())
+            print(f"[LearningBuddy] Found {len(course_links)} unique enrolled courses on Moodle:")
 
             best_id: str | None = None
             best_score = 0.0
             best_text = ""
             search_lower = search_name.lower().strip()
 
-            for link in course_links:
-                href = link.get("href", "")
-                text = link.get("text", "").strip()
+            for cid, link in seen_ids.items():
+                text = link["text"].strip()
                 text_lower = text.lower()
 
-                m = re.search(r"course/view\.php\?id=(\d+)", href)
-                if not m or not text:
-                    continue
+                print(f"  [{cid}] {text[:70]}")
 
-                course_id = m.group(1)
-                print(f"  [{course_id}] {text[:70]}")
+                score = 0.0
 
+                # Strategy A: Direct string matching
                 if search_lower == text_lower:
                     score = 1.0
                 elif search_lower in text_lower:
@@ -112,23 +156,49 @@ class LearningBuddyAgent:
                 elif text_lower in search_lower:
                     score = 0.85
                 else:
+                    # Strategy B: Word overlap (handles partial matches)
                     search_words = [w for w in search_lower.split() if len(w) > 3]
-                    score = 0.0
-                    if search_words:
-                        overlap = sum(1 for w in search_words if w in text_lower)
-                        score = overlap / len(search_words)
+                    text_words = [w for w in text_lower.split() if len(w) > 3]
+                    if search_words and text_words:
+                        forward = sum(1 for w in search_words if any(
+                            w in tw or tw in w for tw in text_words
+                        ))
+                        score = forward / len(search_words)
+
+                # Strategy C: Match via course code in brackets e.g. (IN2228)
+                code_match = re.search(r"\b([A-Z]{2,3}\d{4,5})\b", search_name.upper())
+                if code_match:
+                    code = code_match.group(1)
+                    if code.lower() in text_lower:
+                        score = max(score, 0.95)
+                        print(f"  → Course code match: {code}")
+
+                # Strategy D: Cross-language match via known TUMonline courses
+                for known in all_known_lower:
+                    known_words = [w for w in known.split() if len(w) > 4]
+                    if not known_words:
+                        continue
+                    overlap = sum(1 for w in known_words if w in text_lower)
+                    ratio = overlap / len(known_words)
+                    if ratio >= 0.5:
+                        s_words = [w for w in search_lower.split() if len(w) > 3]
+                        if s_words and sum(1 for w in s_words if w in known) / len(s_words) >= 0.5:
+                            score = max(score, ratio * 0.8)
 
                 if score > best_score:
                     best_score = score
-                    best_id = course_id
+                    best_id = cid
                     best_text = text
 
-            if best_id and best_score >= 0.5:
+            if best_id and best_score >= 0.4:
                 print(f"[LearningBuddy] Best match: '{best_text}' "
                       f"(score={best_score:.2f}) → course ID {best_id}")
                 return best_id
 
-            print(f"[LearningBuddy] No good match found (best score: {best_score:.2f})")
+            print(f"[LearningBuddy] No confident match (best score: {best_score:.2f})")
+            if best_id:
+                print(f"[LearningBuddy] Using best available: '{best_text}' → {best_id}")
+                return best_id
             return None
 
         except Exception as exc:
@@ -604,14 +674,28 @@ Format as clean markdown with ## Week headers."""
             course_name = best_match
             print(f"[LearningBuddy] Matched course from profile: '{course_name}'")
         else:
-            keywords = ["pass", "prepare", "exam", "study", "help", "for"]
-            words = user_input.split()
-            for i, word in enumerate(words):
-                if word.lower() in keywords and i + 1 < len(words):
-                    candidate = " ".join(words[i + 1: i + 4]).strip(".,?!")
-                    if len(candidate) > 3:
-                        course_name = candidate
+            # Check for explicit course code in user input (e.g. "IN2346", "MA9412")
+            code_in_input = re.search(r"\b([A-Z]{2,3}\d{4,5})\b", user_input.upper())
+            if code_in_input:
+                code = code_in_input.group(1)
+                for c in known_courses:
+                    if code.lower() in c.lower():
+                        best_match = c
+                        print(f"[LearningBuddy] Matched via course code {code}: '{c}'")
                         break
+                if not best_match:
+                    course_name = code
+            if best_match:
+                course_name = best_match
+            elif not course_name:
+                keywords = ["pass", "prepare", "exam", "study", "help", "for"]
+                words = user_input.split()
+                for i, word in enumerate(words):
+                    if word.lower() in keywords and i + 1 < len(words):
+                        candidate = " ".join(words[i + 1: i + 4]).strip(".,?!")
+                        if len(candidate) > 3:
+                            course_name = candidate
+                            break
 
         if not course_name:
             course_name = known_courses[0] if known_courses else "Machine Learning"
