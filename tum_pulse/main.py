@@ -746,7 +746,7 @@ with tab_chat:
     # ══════════════════════════════════════════════════════════
     if active_chat == "learning_buddy":
         _lb_db = SQLiteMemory()
-        _lb_courses = _lb_db.get_profile("courses") or []
+        _lb_courses = _lb_db.get_profile("enrolled") or []
 
         if not _lb_courses:
             st.info("No courses found in your profile yet. Sync TUMonline first via the sidebar.")
