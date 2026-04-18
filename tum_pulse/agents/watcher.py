@@ -1,11 +1,13 @@
 """WatcherAgent: scrapes TUMonline (via NAT REST API) and Moodle for deadlines."""
 
+import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
 
+from tum_pulse.config import DB_PATH
 from tum_pulse.memory.database import SQLiteMemory
 
 TUM_API_BASE = "https://api.srv.nat.tum.de"
@@ -215,6 +217,49 @@ class WatcherAgent:
         ]
 
     # ------------------------------------------------------------------
+    # Alerts
+    # ------------------------------------------------------------------
+
+    def check_and_create_alerts(self) -> int:
+        """Create alerts for deadlines within the next 2 days, skipping duplicates.
+
+        Queries get_upcoming_deadlines(days=2), checks the alerts table for
+        any existing row with the same message to avoid duplicates (both sent
+        and unsent), then calls create_alert() for any new ones.
+
+        Returns:
+            Number of new alert rows created.
+        """
+        upcoming = self.db.get_upcoming_deadlines(days=2)
+        if not upcoming:
+            return 0
+
+        with sqlite3.connect(DB_PATH) as conn:
+            existing_messages = {
+                row[0] for row in conn.execute("SELECT message FROM alerts").fetchall()
+            }
+
+        created = 0
+        for dl in upcoming:
+            try:
+                delta = datetime.strptime(dl["deadline_date"], "%Y-%m-%d") - datetime.now().replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                days_away = max(delta.days, 0)
+            except ValueError:
+                days_away = 0
+
+            message = f"⚠️ Deadline in {days_away} days: {dl['title']} ({dl['course']})"
+            if message not in existing_messages:
+                self.db.create_alert(message=message, deadline_date=dl["deadline_date"])
+                existing_messages.add(message)
+                created += 1
+
+        if created:
+            print(f"[WatcherAgent] Created {created} new alert(s)")
+        return created
+
+    # ------------------------------------------------------------------
     # Main entry points
     # ------------------------------------------------------------------
 
@@ -252,6 +297,8 @@ class WatcherAgent:
         lines = [f"Found {len(all_deadlines)} deadline(s):\n"]
         for dl in sorted(all_deadlines, key=lambda x: x["deadline_date"]):
             lines.append(f"  • [{dl['deadline_date']}] {dl['title']} ({dl['course']})")
+
+        self.check_and_create_alerts()
         return "\n".join(lines)
 
     def get_this_week(self) -> str:

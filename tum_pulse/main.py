@@ -1,10 +1,12 @@
 """TUM Pulse — Streamlit chat interface entry point."""
 
 import json
+import threading
 
 import streamlit as st
 
 from tum_pulse.agents.orchestrator import run as orchestrator_run
+from tum_pulse.agents.watcher import WatcherAgent
 from tum_pulse.memory.database import SQLiteMemory
 
 # ---------------------------------------------------------------------------
@@ -26,6 +28,30 @@ if "messages" not in st.session_state:
 
 if "last_agent" not in st.session_state:
     st.session_state.last_agent = ""
+
+if "toasted_alert_ids" not in st.session_state:
+    st.session_state.toasted_alert_ids = set()
+
+# ---------------------------------------------------------------------------
+# Startup: refresh deadlines in background, then surface any pending alerts
+# ---------------------------------------------------------------------------
+
+def _background_scrape() -> None:
+    try:
+        WatcherAgent().run()
+    except Exception:
+        pass
+
+if "startup_done" not in st.session_state:
+    st.session_state.startup_done = True
+    threading.Thread(target=_background_scrape, daemon=True).start()
+
+_db = SQLiteMemory()
+for _alert in _db.get_pending_alerts():
+    if _alert["id"] not in st.session_state.toasted_alert_ids:
+        st.toast(_alert["message"], icon="⚠️")
+        _db.mark_alert_sent(_alert["id"])
+        st.session_state.toasted_alert_ids.add(_alert["id"])
 
 # ---------------------------------------------------------------------------
 # Sidebar — student profile
@@ -74,6 +100,16 @@ with st.sidebar:
             st.success("Profile saved!")
         except json.JSONDecodeError:
             st.error("Invalid JSON — please check your input.")
+
+    st.divider()
+
+    st.subheader("🔔 Upcoming Alerts")
+    _imminent = SQLiteMemory().get_upcoming_deadlines(days=2)
+    if _imminent:
+        for _dl in _imminent:
+            st.warning(f"**{_dl['title']}**  \n{_dl['course']} — {_dl['deadline_date']}")
+    else:
+        st.caption("No deadlines in the next 2 days.")
 
     st.divider()
     st.caption("Powered by Amazon Bedrock + LangGraph")
