@@ -729,9 +729,9 @@ Format as clean markdown with ## Week headers."""
 if __name__ == "__main__":
     agent = LearningBuddyAgent()
     print("Testing real Moodle PDF download...")
-    paths = agent.download_moodle_pdfs("Machine Learning")
+    paths = agent.download_moodle_pdfs("Analysis 1")
     print(f"Got {len(paths)} files:")
     for p in paths:
         print(f"  {p}")
     print("\nGenerating study plan...")
-    print(agent.run("Help me pass Machine Learning"))
+    print(agent.run("Help me pass Analysis 1"))
