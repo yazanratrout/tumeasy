@@ -36,17 +36,32 @@ if "toasted_alert_ids" not in st.session_state:
 # Startup: refresh deadlines in background, then surface any pending alerts
 # ---------------------------------------------------------------------------
 
+_DEFAULT_COURSES = [
+    "Introduction to Programming",
+    "Linear Algebra",
+    "Analysis",
+    "Algorithms and Data Structures",
+]
+
+_db = SQLiteMemory()
+
+# Seed default courses so enrollment filtering works on first run / after a DB reset.
+# Only writes when no courses are saved yet — never overwrites the user's real list.
+if not _db.get_profile("courses"):
+    _db.save_profile("courses", _DEFAULT_COURSES)
+
+
 def _background_scrape() -> None:
     try:
         WatcherAgent().run()
     except Exception:
         pass
 
+
 if "startup_done" not in st.session_state:
     st.session_state.startup_done = True
     threading.Thread(target=_background_scrape, daemon=True).start()
 
-_db = SQLiteMemory()
 for _alert in _db.get_pending_alerts():
     if _alert["id"] not in st.session_state.toasted_alert_ids:
         st.toast(_alert["message"], icon="⚠️")
@@ -64,12 +79,7 @@ with st.sidebar:
 
     student_name = st.text_input("Your Name", placeholder="Max Mustermann")
 
-    _saved_courses = _db.get_profile("courses") or [
-        "Introduction to Programming",
-        "Linear Algebra",
-        "Analysis",
-        "Algorithms and Data Structures",
-    ]
+    _saved_courses = _db.get_profile("courses") or _DEFAULT_COURSES
     default_profile = json.dumps(
         {
             "grades": {
