@@ -261,63 +261,105 @@ class TUMonlineConnector:
 
         return result
 
-    def debug_grades_page(self, username: str, password: str) -> None:
-        """Navigate to known TUMonline grade pages and print their URLs and HTML structure."""
+    def debug_intercept_grade_requests(self, username: str, password: str) -> None:
+        """Intercept all XHR/fetch requests made by the TUMonline SPA to find grade endpoints.
+
+        Opens a visible browser, logs in, navigates to the grades section,
+        and prints every API request the SPA makes so we can identify the
+        correct endpoint and response structure.
+        """
         from playwright.sync_api import sync_playwright
 
-        GRADE_URLS = [
-            "/tumonline/wbStELP.cbSEL",
-            "/tumonline/wbStuPla.cbStuProgress",
-            "/tumonline/wbStuPla.cbPruefungen",
-            "/tumonline/wbPrfList.cbShowLV",
-            "/tumonline/wbPrfList.cbShowAll",
-            "/tumonline/wbKUVKU.cbSEL",
-            "/tumonline/wbStELPV.cbSEL",
-            "/tumonline/wbStNotenDaten.cbNotenDaten",
-            "/tumonline/wbStNotenSpiegel.cbNotenSpiegel",
-        ]
+        captured_requests: list[dict] = []
 
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=False)
-            page = browser.new_page()
+            context = browser.new_context()
+            page = context.new_page()
+
+            def handle_request(request):
+                url = request.url
+                if any(kw in url for kw in [
+                    "rest/", "api/", "ajax", "json", "student",
+                    "exam", "grade", "note", "result", "achievement",
+                    "pruef", "leistung", "transcript",
+                ]):
+                    captured_requests.append({"url": url, "method": request.method})
+
+            def handle_response(response):
+                url = response.url
+                if any(kw in url.lower() for kw in [
+                    "exam", "grade", "note", "result", "achievement",
+                    "pruef", "leistung", "transcript", "performance",
+                    "student/my",
+                ]):
+                    try:
+                        body = response.json()
+                        print(f"\n{'='*60}")
+                        print(f"INTERCEPTED: {url}")
+                        print(f"STATUS: {response.status}")
+                        print(f"RESPONSE (first 800 chars):")
+                        print(json.dumps(body)[:800])
+                    except Exception:
+                        pass
+
+            page.on("request", handle_request)
+            page.on("response", handle_response)
+
             try:
                 if not self.login(page, username, password):
                     print("Login failed")
                     return
 
-                for url in GRADE_URLS:
+                print("Login successful — navigating to SPA...")
+
+                page.goto(
+                    "https://campus.tum.de/tumonline/ee/ui/ca2/app/desktop/#/home?$ctx=lang=en",
+                    timeout=30_000,
+                )
+                page.wait_for_load_state("networkidle", timeout=20_000)
+                page.wait_for_timeout(2000)
+
+                print("\nOn SPA home. Now navigating to grades/transcript section...")
+                print("Try these in order in the visible browser:")
+                print("1. Look for 'My Studies', 'Examinations', 'Grades', or 'Transcript'")
+                print("2. Click on it and watch the terminal for intercepted API calls")
+                print("3. Also try: My Studies > Examinations > Passed Examinations")
+                print("\nDirect SPA URLs to try:")
+
+                grade_routes = [
+                    "#/studyplan?$ctx=lang=en",
+                    "#/examinations?$ctx=lang=en",
+                    "#/myexams?$ctx=lang=en",
+                    "#/myresults?$ctx=lang=en",
+                    "#/transcript?$ctx=lang=en",
+                    "#/performance?$ctx=lang=en",
+                    "#/achievements?$ctx=lang=en",
+                ]
+
+                base = "https://campus.tum.de/tumonline/ee/ui/ca2/app/desktop/"
+                for route in grade_routes:
+                    print(f"  {base}{route}")
                     try:
-                        full_url = "https://campus.tum.de" + url
-                        page.goto(full_url, timeout=15_000)
-                        page.wait_for_load_state("networkidle", timeout=10_000)
+                        page.goto(f"{base}{route}", timeout=10_000)
+                        page.wait_for_load_state("networkidle", timeout=8_000)
+                        page.wait_for_timeout(1500)
+                    except Exception:
+                        pass
 
-                        final_url = page.url
-                        title = page.title()
-                        body_text = page.inner_text("body")[:300].strip()
-                        has_table = page.locator("table").count() > 0
-                        has_grade = any(g in body_text.lower() for g in
-                                        ["grade", "note", "prüfung", "ects", "bestanden"])
+                print("\n\nAll API requests captured so far:")
+                for r in captured_requests:
+                    print(f"  [{r['method']}] {r['url']}")
 
-                        print(f"\n{'='*60}")
-                        print(f"URL tried: {url}")
-                        print(f"Final URL: {final_url}")
-                        print(f"Title: {title}")
-                        print(f"Has table: {has_table} | Has grade content: {has_grade}")
-                        print(f"Body preview: {body_text[:200]}")
-
-                        if has_grade or has_table:
-                            print(">>> PROMISING PAGE - printing table structure:")
-                            tables = page.locator("table").all()
-                            for i, table in enumerate(tables[:2]):
-                                print(f"  Table {i}: {table.inner_text()[:400]}")
-
-                    except Exception as exc:
-                        print(f"URL {url} failed: {exc}")
-
-                print("\n\nBrowser staying open for 30s — check manually if needed")
-                page.wait_for_timeout(30_000)
+                print("\n\nBrowser staying open for 60 seconds.")
+                print("MANUALLY navigate to your grades/transcript page and")
+                print("watch the terminal — intercepted responses will print automatically.")
+                page.wait_for_timeout(60_000)
 
             finally:
+                print("\n\nFINAL captured request list:")
+                for r in captured_requests:
+                    print(f"  [{r['method']}] {r['url']}")
                 browser.close()
 
     def scrape_with_courses(self, username: str, password: str) -> dict:
@@ -361,10 +403,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if "--debug-grades" in sys.argv:
-        print("=== Finding grades page ===")
-        TUMonlineConnector().debug_grades_page(username, password)
+        TUMonlineConnector().debug_intercept_grade_requests(username, password)
     else:
-        print("=== Full scrape ===")
         result = TUMonlineConnector().scrape_with_courses(username, password)
         courses = result["courses"]
         print(f"Enrolled: {courses['enrolled']}")
