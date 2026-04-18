@@ -35,6 +35,9 @@ class SQLiteMemory:
                     created_at   TEXT    DEFAULT (datetime('now'))
                 );
 
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_deadlines_unique
+                    ON deadlines (title, source, deadline_date);
+
                 CREATE TABLE IF NOT EXISTS student_profile (
                     key   TEXT PRIMARY KEY,
                     value TEXT
@@ -71,10 +74,10 @@ class SQLiteMemory:
         """Insert a deadline and return its new row id."""
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute(
-                "INSERT INTO deadlines (title, course, deadline_date, source) VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO deadlines (title, course, deadline_date, source) VALUES (?, ?, ?, ?)",
                 (title, course, deadline_date, source),
             )
-            return cur.lastrowid
+            return cur.lastrowid or 0
 
     def get_upcoming_deadlines(self, days: int = 7) -> list[dict]:
         """Return deadlines within the next *days* days, sorted by date."""
