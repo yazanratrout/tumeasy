@@ -29,80 +29,111 @@ class LearningBuddyAgent:
     # ------------------------------------------------------------------
 
     def _find_moodle_course_id(self, course_name: str, page, session: requests.Session) -> str | None:
-        """Search Moodle for a course matching course_name and return its ID.
+        """Find Moodle course ID by matching against student's enrolled courses.
 
-        Tries:
-        1. My courses dashboard: /my/ — scrape enrolled course links
-        2. Moodle search: /course/search.php?search={course_name}
+        Scrapes /my/courses.php which lists ALL enrolled courses with their
+        exact names and IDs — then matches against course_name exactly first,
+        then falls back to partial matching.
 
         Args:
-            course_name: Human-readable course name to search for.
+            course_name: Course name to find (from user input or TUMonline profile).
             page: Active Playwright page (authenticated).
             session: Authenticated requests.Session with Moodle cookies.
 
         Returns:
             Course ID string or None.
         """
-        from bs4 import BeautifulSoup
+        course_name_lower = course_name.lower().strip()
 
-        course_name_lower = course_name.lower()
-        candidates: list[tuple[float, str, str]] = []  # (score, course_id, link_text)
+        # Find best match in known SQLite courses first to refine search term
+        known_courses = self.db.get_profile("courses") or []
+        known_courses_lower = {c.lower().strip(): c for c in known_courses}
 
-        def _score(text: str) -> float:
-            significant_words = [w for w in course_name_lower.split() if len(w) > 3]
-            if not significant_words:
-                return 0.0
-            matches = sum(1 for w in significant_words if w in text)
-            return matches / len(significant_words)
+        best_known: str | None = None
+        best_known_score = 0.0
+        for known_lower, known_original in known_courses_lower.items():
+            if course_name_lower == known_lower:
+                best_known = known_original
+                best_known_score = 1.0
+                break
+            if course_name_lower in known_lower or known_lower in course_name_lower:
+                score = len(course_name_lower) / max(len(known_lower), 1)
+                if score > best_known_score:
+                    best_known = known_original
+                    best_known_score = score
+            else:
+                words = [w for w in course_name_lower.split() if len(w) > 3]
+                if words:
+                    overlap = sum(1 for w in words if w in known_lower)
+                    score = overlap / len(words)
+                    if score > best_known_score and score >= 0.6:
+                        best_known = known_original
+                        best_known_score = score
 
-        # Strategy 1: scrape /my/ dashboard for enrolled course links
+        search_name = best_known or course_name
+        print(f"[LearningBuddy] Looking for Moodle course: '{search_name}'")
+
+        # Scrape /my/courses.php — definitive list of enrolled courses with IDs
         try:
-            resp = session.get(
-                f"{MOODLE_BASE_URL}/my/",
-                timeout=15,
-                allow_redirects=True,
-            )
-            soup = BeautifulSoup(resp.text, "lxml")
+            page.goto(f"{MOODLE_BASE_URL}/my/courses.php", timeout=15_000)
+            page.wait_for_load_state("networkidle", timeout=10_000)
+            page.wait_for_timeout(1000)
 
-            for link in soup.find_all("a", href=True):
-                href = link.get("href", "")
-                text = link.get_text(strip=True).lower()
-                m = re.search(r"course/view\.php\?id=(\d+)", href)
-                if m and text:
-                    score = _score(text)
-                    if score >= 0.5:
-                        candidates.append((score, m.group(1), text))
-        except Exception as exc:
-            print(f"[LearningBuddy] Dashboard scrape failed: {exc}")
+            course_links = page.evaluate("""() => {
+                return Array.from(document.querySelectorAll('a[href*="course/view.php"]')).map(a => ({
+                    href: a.href,
+                    text: a.textContent.trim()
+                }));
+            }""")
 
-        # Strategy 2: Moodle course search
-        try:
-            search_term = course_name.replace(" ", "+")
-            resp = session.get(
-                f"{MOODLE_BASE_URL}/course/search.php?search={search_term}",
-                timeout=15,
-            )
-            soup = BeautifulSoup(resp.text, "lxml")
-            for link in soup.find_all("a", href=True):
+            print(f"[LearningBuddy] Found {len(course_links)} enrolled courses on Moodle:")
+
+            best_id: str | None = None
+            best_score = 0.0
+            best_text = ""
+            search_lower = search_name.lower().strip()
+
+            for link in course_links:
                 href = link.get("href", "")
-                text = link.get_text(strip=True).lower()
+                text = link.get("text", "").strip()
+                text_lower = text.lower()
+
                 m = re.search(r"course/view\.php\?id=(\d+)", href)
-                if m and text:
-                    score = _score(text)
-                    if score >= 0.5:
-                        candidates.append((score, m.group(1), text))
+                if not m or not text:
+                    continue
+
+                course_id = m.group(1)
+                print(f"  [{course_id}] {text[:70]}")
+
+                if search_lower == text_lower:
+                    score = 1.0
+                elif search_lower in text_lower:
+                    score = 0.9
+                elif text_lower in search_lower:
+                    score = 0.85
+                else:
+                    search_words = [w for w in search_lower.split() if len(w) > 3]
+                    score = 0.0
+                    if search_words:
+                        overlap = sum(1 for w in search_words if w in text_lower)
+                        score = overlap / len(search_words)
+
+                if score > best_score:
+                    best_score = score
+                    best_id = course_id
+                    best_text = text
+
+            if best_id and best_score >= 0.5:
+                print(f"[LearningBuddy] Best match: '{best_text}' "
+                      f"(score={best_score:.2f}) → course ID {best_id}")
+                return best_id
+
+            print(f"[LearningBuddy] No good match found (best score: {best_score:.2f})")
+            return None
+
         except Exception as exc:
             print(f"[LearningBuddy] Course search failed: {exc}")
-
-        if candidates:
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            best_score, best_id, best_text = candidates[0]
-            print(f"[LearningBuddy] Best match: '{best_text[:60]}' "
-                  f"(score={best_score:.2f}) → course ID {best_id}")
-            return best_id
-
-        print(f"[LearningBuddy] Could not find Moodle course ID for '{course_name}'")
-        return None
+            return None
 
     def download_moodle_pdfs(self, course_name: str) -> list[str]:
         """Download real PDFs for course_name from Moodle via SSO login.
@@ -557,16 +588,34 @@ Format as clean markdown with ## Week headers."""
         Returns:
             Formatted markdown study plan.
         """
-        # Extract course name from input (simple heuristic)
-        course_name = "Analysis 2"  # default
-        keywords = ["for", "pass", "prepare", "exam", "study"]
-        words = user_input.split()
-        for i, word in enumerate(words):
-            if word.lower() in keywords and i + 1 < len(words):
-                candidate = " ".join(words[i + 1 : i + 3]).strip(".,?!")
-                if len(candidate) > 3:
-                    course_name = candidate
-                    break
+        # Extract course name — check against known enrolled courses first
+        known_courses = self.db.get_profile("courses") or []
+        course_name = None
+
+        user_lower = user_input.lower()
+        best_match: str | None = None
+        best_match_len = 0
+        for course in known_courses:
+            if course.lower() in user_lower and len(course) > best_match_len:
+                best_match = course
+                best_match_len = len(course)
+
+        if best_match:
+            course_name = best_match
+            print(f"[LearningBuddy] Matched course from profile: '{course_name}'")
+        else:
+            keywords = ["pass", "prepare", "exam", "study", "help", "for"]
+            words = user_input.split()
+            for i, word in enumerate(words):
+                if word.lower() in keywords and i + 1 < len(words):
+                    candidate = " ".join(words[i + 1: i + 4]).strip(".,?!")
+                    if len(candidate) > 3:
+                        course_name = candidate
+                        break
+
+        if not course_name:
+            course_name = known_courses[0] if known_courses else "Machine Learning"
+            print(f"[LearningBuddy] No course detected — using: '{course_name}'")
 
         try:
             pdf_paths = self.download_moodle_pdfs(course_name)
