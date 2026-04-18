@@ -186,75 +186,69 @@ class TUMonlineConnector:
             result["all_courses"] = list(result["enrolled"])
             print(f"[TUMonlineConnector] Found {len(result['enrolled'])} enrolled courses via REST API")
 
-            # Step 3: fetch grades from current-semester examinations
+            # Step 3: Fetch grades from achievements endpoint (confirmed working)
             try:
-                grades_data = page.evaluate(f"""async () => {{
+                achievements_data = page.evaluate(f"""async () => {{
                     const r = await fetch(
-                        '/tumonline/ee/rest/slc.tm.cp/student/myExaminations?$filter=termId-eq={semester_id}&$skip=0&$top=100',
+                        '/tumonline/ee/rest/slc.xm.ac/achievements?$orderBy=acDate=descnf&$top=200',
                         {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}}}
                     );
                     return r.ok ? await r.json() : {{}};
                 }}""")
 
-                for exam in grades_data.get("examinations", []):
-                    grade_val = (
-                        exam.get("grade", {}).get("value") or
-                        exam.get("gradeValue") or
-                        exam.get("grade_value")
-                    )
-                    course_title = (
-                        exam.get("course", {}).get("courseTitle", {}).get("value") or
-                        (exam.get("courseTitle") or {}).get("value") or
-                        exam.get("title") or ""
-                    ).strip()
+                resources = achievements_data.get("resource", [])
+                print(f"[TUMonlineConnector] Achievements endpoint returned {len(resources)} records")
 
-                    if course_title and grade_val:
+                for resource in resources:
+                    content = resource.get("content", {})
+                    dto = content.get("achievementDto", {})
+                    if not dto:
+                        continue
+
+                    course_lib = dto.get("cpCourseLibDto", {})
+                    course_title_obj = course_lib.get("courseTitle", {})
+                    course_name = course_title_obj.get("value")
+                    if not course_name or isinstance(course_name, dict):
+                        translations = course_title_obj.get("translations", {})
+                        trans_list = translations.get("translation", []) if isinstance(translations, dict) else []
+                        en_trans = next((t.get("value") for t in trans_list if t.get("lang") == "en"), None)
+                        course_name = en_trans or (dto.get("title") or {}).get("value", "")
+
+                    if not course_name or not isinstance(course_name, str):
+                        continue
+                    course_name = course_name.strip()
+
+                    grade_raw = dto.get("grade")
+                    grade_val = (
+                        grade_raw.get("value") if isinstance(grade_raw, dict)
+                        else grade_raw or
+                        dto.get("gradeValue") or
+                        dto.get("acGrade") or
+                        dto.get("mark") or
+                        dto.get("result")
+                    )
+
+                    if course_name and course_name not in result["all_courses"]:
+                        result["all_courses"].append(course_name)
+
+                    if grade_val is not None:
                         try:
                             grade_float = float(str(grade_val).replace(",", "."))
                             if 1.0 <= grade_float <= 5.0:
-                                result["grades"][course_title] = grade_float
+                                result["grades"][course_name] = grade_float
                         except (ValueError, TypeError):
                             pass
 
-                print(f"[TUMonlineConnector] Found {len(result['grades'])} graded courses")
+                print(f"[TUMonlineConnector] Parsed {len(result['all_courses'])} completed courses, "
+                      f"{len(result['grades'])} with numeric grades")
+
+                if resources:
+                    first_dto = resources[0].get("content", {}).get("achievementDto", {})
+                    print(f"[TUMonlineConnector] Sample achievement fields: {list(first_dto.keys())}")
+                    print(f"[TUMonlineConnector] Sample dto (first 400 chars): {json.dumps(first_dto)[:400]}")
+
             except Exception as exc:
-                print(f"[TUMonlineConnector] Grade fetch failed: {exc}")
-
-            # Also try the full transcript endpoint (all semesters)
-            try:
-                transcript_data = page.evaluate(f"""async () => {{
-                    const r = await fetch(
-                        '/tumonline/ee/rest/slc.tm.cp/student/myExaminations?$skip=0&$top=200',
-                        {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}}}
-                    );
-                    return r.ok ? await r.json() : {{}};
-                }}""")
-
-                for exam in transcript_data.get("examinations", []):
-                    grade_val = (
-                        exam.get("grade", {}).get("value") or
-                        exam.get("gradeValue") or
-                        exam.get("grade_value")
-                    )
-                    course_title = (
-                        exam.get("course", {}).get("courseTitle", {}).get("value") or
-                        (exam.get("courseTitle") or {}).get("value") or
-                        exam.get("title") or ""
-                    ).strip()
-
-                    if course_title and grade_val and course_title not in result["grades"]:
-                        try:
-                            grade_float = float(str(grade_val).replace(",", "."))
-                            if 1.0 <= grade_float <= 5.0:
-                                result["grades"][course_title] = grade_float
-                                if course_title not in result["all_courses"]:
-                                    result["all_courses"].append(course_title)
-                        except (ValueError, TypeError):
-                            pass
-
-                print(f"[TUMonlineConnector] Total graded courses after transcript: {len(result['grades'])}")
-            except Exception as exc:
-                print(f"[TUMonlineConnector] Transcript fetch failed: {exc}")
+                print(f"[TUMonlineConnector] Achievements fetch failed: {exc}")
 
         except Exception as exc:
             print(f"[TUMonlineConnector] get_enrolled_courses error: {exc}")
@@ -356,6 +350,36 @@ class TUMonlineConnector:
                 print("watch the terminal — intercepted responses will print automatically.")
                 page.wait_for_timeout(60_000)
 
+                # Fetch full achievements response programmatically for field inspection
+                print("\n\n=== PROGRAMMATIC ACHIEVEMENTS FETCH ===")
+                try:
+                    token_data = page.evaluate("""async () => {
+                        const r = await fetch('/tumonline/ee/rest/auth/token/refresh', {
+                            method: 'POST',
+                            headers: {Accept: 'application/json', 'Content-Type': 'application/json'},
+                            body: '{}'
+                        });
+                        return r.ok ? await r.json() : {};
+                    }""")
+                    token = token_data.get("accessToken", "")
+                    if token:
+                        token_js_local = json.dumps(token)
+                        data = page.evaluate(f"""async () => {{
+                            const r = await fetch(
+                                '/tumonline/ee/rest/slc.xm.ac/achievements?$orderBy=acDate=descnf&$top=3',
+                                {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js_local}}}}}
+                            );
+                            return r.ok ? await r.json() : {{}};
+                        }}""")
+                        resources = data.get("resource", [])
+                        print(f"Got {len(resources)} achievements")
+                        for i, r in enumerate(resources[:2]):
+                            dto = r.get("content", {}).get("achievementDto", {})
+                            print(f"\nRecord {i+1} keys: {list(dto.keys())}")
+                            print(f"Record {i+1} full: {json.dumps(dto)[:600]}")
+                except Exception as e:
+                    print(f"Programmatic fetch failed: {e}")
+
             finally:
                 print("\n\nFINAL captured request list:")
                 for r in captured_requests:
@@ -404,8 +428,16 @@ if __name__ == "__main__":
 
     if "--debug-grades" in sys.argv:
         TUMonlineConnector().debug_intercept_grade_requests(username, password)
+    elif "--test-achievements" in sys.argv:
+        result = TUMonlineConnector().scrape_with_courses(username, password)
+        courses = result["courses"]
+        print(f"\nAll completed courses ({len(courses['all_courses'])}):")
+        for c in courses["all_courses"]:
+            grade = courses["grades"].get(c, "no grade")
+            print(f"  - {c}: {grade}")
     else:
         result = TUMonlineConnector().scrape_with_courses(username, password)
         courses = result["courses"]
         print(f"Enrolled: {courses['enrolled']}")
-        print(f"Grades: {courses['grades']}")
+        print(f"Grades ({len(courses['grades'])}): {dict(list(courses['grades'].items())[:5])}")
+        print(f"All courses ({len(courses['all_courses'])}): {courses['all_courses'][:10]}")
