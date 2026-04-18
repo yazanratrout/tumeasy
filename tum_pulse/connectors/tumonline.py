@@ -218,15 +218,19 @@ class TUMonlineConnector:
                         continue
                     course_name = course_name.strip()
 
-                    grade_raw = dto.get("grade")
+                    # Extract grade from gradeDto (confirmed field name from API)
+                    grade_dto = dto.get("gradeDto") or {}
                     grade_val = (
-                        grade_raw.get("value") if isinstance(grade_raw, dict)
-                        else grade_raw or
-                        dto.get("gradeValue") or
-                        dto.get("acGrade") or
-                        dto.get("mark") or
-                        dto.get("result")
+                        grade_dto.get("grade") or
+                        grade_dto.get("value") or
+                        grade_dto.get("gradeValue") or
+                        grade_dto.get("key") or
+                        grade_dto.get("short")
                     )
+
+                    # Also print gradeDto for first few records to confirm structure
+                    if len(result["grades"]) == 0 and grade_dto:
+                        print(f"[TUMonlineConnector] gradeDto sample: {json.dumps(grade_dto)[:200]}")
 
                     if course_name and course_name not in result["all_courses"]:
                         result["all_courses"].append(course_name)
