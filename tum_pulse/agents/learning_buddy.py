@@ -730,48 +730,69 @@ Format as clean markdown with ## Week headers."""
         if "weak_subjects" not in ctx:
             ctx["weak_subjects"] = _infer_weak_subjects(ctx.get("grades", {}))
 
-        # Extract course name — check against known enrolled courses first
+        # Step 1: Check if any known enrolled course name appears in the input
         known_courses = self.db.get_profile("courses") or ctx.get("courses") or []
         course_name = None
-
-        user_lower = user_input.lower()
-        best_match: str | None = None
         best_match_len = 0
+        user_lower = user_input.lower()
+
         for course in known_courses:
             if course.lower() in user_lower and len(course) > best_match_len:
-                best_match = course
+                course_name = course
                 best_match_len = len(course)
 
-        if best_match:
-            course_name = best_match
+        if course_name:
             print(f"[LearningBuddy] Matched course from profile: '{course_name}'")
-        else:
-            # Check for explicit course code in user input (e.g. "IN2346", "MA9412")
-            code_in_input = re.search(r"\b([A-Z]{2,3}\d{4,5})\b", user_input.upper())
-            if code_in_input:
-                code = code_in_input.group(1)
-                for c in known_courses:
-                    if code.lower() in c.lower():
-                        best_match = c
-                        print(f"[LearningBuddy] Matched via course code {code}: '{c}'")
-                        break
-                if not best_match:
-                    course_name = code
-            if best_match:
-                course_name = best_match
-            elif not course_name:
-                keywords = ["pass", "prepare", "exam", "study", "help", "for"]
-                words = user_input.split()
-                for i, word in enumerate(words):
-                    if word.lower() in keywords and i + 1 < len(words):
-                        candidate = " ".join(words[i + 1: i + 4]).strip(".,?!")
-                        if len(candidate) > 3:
-                            course_name = candidate
-                            break
 
+        # Step 2: Check for course code mention e.g. "IN2346", "MA9412"
         if not course_name:
-            course_name = known_courses[0] if known_courses else "Machine Learning"
-            print(f"[LearningBuddy] No course detected — using: '{course_name}'")
+            code_match = re.search(r'\b([A-Z]{2,3}\d{4,5})\b', user_input.upper())
+            if code_match:
+                code = code_match.group(1)
+                for course in known_courses:
+                    if code.lower() in course.lower():
+                        course_name = course
+                        print(f"[LearningBuddy] Matched via course code {code}: '{course_name}'")
+                        break
+
+        # Step 3: Smart keyword extraction — find the course name after
+        # trigger phrases, skipping filler words
+        if not course_name:
+            # Remove common filler phrases to isolate the course name
+            cleaned = user_lower
+            fillers = [
+                "can you please", "can you", "please", "help me", "help",
+                "i want to", "i need to", "i have to", "i must",
+                "make me a", "make a", "create a", "give me a",
+                "studying plan", "study plan", "a plan", "plan for",
+                "make sure i", "to pass", "pass", "prepare for",
+                "prepare", "study for", "study", "exam for", "exam",
+                "for the", "for my", "for",
+            ]
+            for filler in fillers:
+                cleaned = cleaned.replace(filler, " ")
+
+            # Remove timeline words so they don't get picked as course name
+            cleaned = re.sub(
+                r'\b(\d+\s*)?(day|days|week|weeks|month|months|tomorrow|tonight|'
+                r'a week|next week|make|studying|a study)\b', ' ', cleaned
+            )
+
+            # Remove punctuation and collapse whitespace
+            cleaned = re.sub(r'[^\w\s]', ' ', cleaned)
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+            # What remains should be the course name
+            if len(cleaned) > 2:
+                course_name = cleaned.title().strip()
+                print(f"[LearningBuddy] Extracted course name: '{course_name}'")
+
+        # Step 4: Final fallback
+        if not course_name or len(course_name) < 2:
+            course_name = known_courses[0] if known_courses else "the course"
+            print(f"[LearningBuddy] No course detected — defaulting to: '{course_name}'")
+
+        print(f"[LearningBuddy] Generating study plan for: '{course_name}'")
 
         try:
             pdf_paths = self.download_moodle_pdfs(course_name)
