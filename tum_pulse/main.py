@@ -369,83 +369,62 @@ def _safe_grade_rows(
     saved_grades: dict | None,
     selected_courses: list | None = None,
 ) -> list[dict[str, object]]:
+    """Build rows for the course data editor (2 columns: checkbox + name)."""
     grades = saved_grades if isinstance(saved_grades, dict) else {}
     courses = saved_courses if isinstance(saved_courses, list) else []
-    selected = {str(course).strip() for course in (selected_courses or []) if str(course).strip()}
+    selected = {
+        str(c).strip() for c in (selected_courses or []) if str(c).strip()
+    }
 
     ordered_courses: list[str] = []
     seen: set[str] = set()
     for course in [*courses, *grades.keys()]:
-        course_name = str(course).strip()
-        if course_name and course_name not in seen:
-            ordered_courses.append(course_name)
-            seen.add(course_name)
+        name = str(course).strip()
+        if name and name not in seen:
+            ordered_courses.append(name)
+            seen.add(name)
 
-    rows: list[dict[str, object]] = []
-    for course in ordered_courses:
-        grade_value = grades.get(course)
-        try:
-            grade_value = float(grade_value) if grade_value not in (None, "") else None
-        except (TypeError, ValueError):
-            grade_value = None
-        rows.append(
-            {
-                "Use for Recommendations": course in selected,
-                "Course": course,
-                "Grade": grade_value,
-            }
-        )
+    rows = [
+        {
+            "Use for Recommendations": course in selected,
+            "Course": course,
+        }
+        for course in ordered_courses
+    ]
 
     if not rows:
-        rows.append(
-            {
-                "Use for Recommendations": False,
-                "Course": "",
-                "Grade": None,
-            }
-        )
+        rows.append({"Use for Recommendations": False, "Course": ""})
+
     return rows
 
 
-def _save_profile_form(student_name: str, grades_rows: list[dict]) -> tuple[bool, str]:
+def _save_profile_form(student_name: str, course_rows: list[dict]) -> tuple[bool, str]:
+    """Persist courses and selected-for-recommendations list to SQLite."""
     cleaned_courses: list[str] = []
-    grades: dict[str, float] = {}
     selected_courses: list[str] = []
 
-    for row in grades_rows:
+    for row in course_rows:
         course = str(row.get("Course", "")).strip()
-        grade = row.get("Grade")
-        use_for_recommendations = bool(row.get("Use for Recommendations", False))
-
+        use = bool(row.get("Use for Recommendations", False))
         if not course:
             continue
-
         if course not in cleaned_courses:
             cleaned_courses.append(course)
-
-        if use_for_recommendations and course not in selected_courses:
+        if use and course not in selected_courses:
             selected_courses.append(course)
-
-        if grade not in (None, ""):
-            try:
-                grades[course] = float(grade)
-            except (TypeError, ValueError):
-                return False, f"Invalid grade for '{course}'. Use numbers like 1.7 or 2.3."
 
     if student_name.strip():
         _db.save_profile("name", student_name.strip())
     _db.save_profile("courses", cleaned_courses)
-    _db.save_profile("grades", grades)
     _db.save_profile("selected_recommendation_courses", selected_courses)
-    _selected_grades = {course: grades[course] for course in selected_courses if course in grades}
-    _db.save_profile("selected_recommendation_grades", _selected_grades)
+    # Keep existing grades untouched — we no longer edit them here
     return True, "Profile saved."
 
 
 def _background_scrape() -> None:
     st.session_state.watcher_running = True
-    st.session_state.watcher_message = "Syncing TUMonline, Moodle, and Confluence in the background…"
     try:
+        # 1. Sync deadlines from TUMonline, Moodle, Confluence
         agent = WatcherAgent()
         summary = agent.run()
         st.session_state.watcher_status = agent.status
@@ -455,9 +434,19 @@ def _background_scrape() -> None:
         st.session_state.watcher_message = f"Background sync failed: {exc}"
     finally:
         has_cached = bool(_db.get_upcoming_deadlines(days=120))
-        st.session_state.watcher_data_mode = _derive_deadlines_mode(st.session_state.watcher_status, has_cached)
-        st.session_state.electives_mode = _derive_electives_mode(_db.get_profile("electives_count") or 0)
+        st.session_state.watcher_data_mode = _derive_deadlines_mode(
+            st.session_state.watcher_status, has_cached
+        )
         st.session_state.watcher_running = False
+
+    try:
+        # 2. Auto-fetch electives in the same background thread
+        from tum_pulse.agents.advisor import get_electives
+        _fresh = get_electives(_db, force_refresh=False)  # use cache if < 24h old
+        _db.save_profile("electives_count", len(_fresh))
+        st.session_state.electives_mode = _derive_electives_mode(len(_fresh))
+    except Exception:
+        pass  # electives failure is non-critical
 
 
 if "startup_done" not in st.session_state:
@@ -507,26 +496,32 @@ with st.sidebar:
         _selected_recommendation_courses,
     )
 
-    st.markdown("**Data Sources**")
-    st.caption(f"Deadlines: {_mode_badge(st.session_state.watcher_data_mode)}")
-    if st.session_state.last_refreshed:
-        st.caption(f"Last deadline sync: {st.session_state.last_refreshed}")
-    if st.session_state.watcher_running:
-        st.info("Deadline sync is running in the background.")
-    elif st.session_state.watcher_message:
-        st.caption(st.session_state.watcher_message)
-
-    _electives_count = SQLiteMemory().get_profile("electives_count") or 0
-    st.caption(f"Electives: {_mode_badge(st.session_state.electives_mode)}")
-    if st.session_state.electives_mode == "live":
-        st.caption(f"{_electives_count} real TUM electives currently cached.")
-    else:
-        st.caption("Using the built-in demo elective catalogue until a live refresh succeeds.")
-
     st.divider()
 
+    st.markdown("""
+    <style>
+    [data-testid="stExpander"] details summary {
+        background-color: #0d47a1 !important;
+        color: white !important;
+        padding: 10px 16px !important;
+        border-radius: 4px !important;
+        font-weight: 500 !important;
+        cursor: pointer !important;
+        border: none !important;
+    }
+    [data-testid="stExpander"] details summary:hover {
+        background-color: #1565c0 !important;
+        color: white !important;
+    }
+    [data-testid="stExpander"] details summary:active {
+        background-color: #0d47a1 !important;
+        color: white !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     with st.expander("👤 Profile", expanded=True):
-        st.caption("Your course table is the single source of truth. Check specific courses to guide elective recommendations.")
+        st.caption("Check specific courses to guide elective recommendations.")
         grades_df = pd.DataFrame(_saved_grades_rows)
         edited_grades = st.data_editor(
             grades_df,
@@ -535,21 +530,25 @@ with st.sidebar:
             hide_index=True,
             column_config={
                 "Use for Recommendations": st.column_config.CheckboxColumn(
-                    "Recommend From",
-                    help="Checked courses are used for elective recommendations. If none are checked, TUM Easy uses all courses by default.",
+                    "✓",
+                    help="Check to include this course in elective recommendations.",
                     default=False,
+                    width="small",
                 ),
-                "Course": st.column_config.TextColumn("Course", width="large"),
-                "Grade": st.column_config.NumberColumn("Grade", min_value=1.0, max_value=5.0, step=0.1, format="%.1f"),
+                "Course": st.column_config.TextColumn(
+                    "Course",
+                    width="large",
+                ),
             },
-            column_order=["Use for Recommendations", "Course", "Grade"],
+            column_order=["Use for Recommendations", "Course"],
         )
-        _selected_count = int(edited_grades["Use for Recommendations"].fillna(False).astype(bool).sum()) if "Use for Recommendations" in edited_grades else 0
+        _selected_count = int(
+            edited_grades["Use for Recommendations"].fillna(False).astype(bool).sum()
+        ) if "Use for Recommendations" in edited_grades else 0
         if _selected_count:
-            st.caption(f"{_selected_count} course(s) selected for elective recommendations.")
+            st.caption(f"{_selected_count} course(s) selected for recommendations.")
         else:
-            st.caption("No course selected. TUM Easy will use all listed courses for recommendations by default.")
-        st.caption("Grades are optional. Leave grade cells empty if you only want to store the course.")
+            st.caption("No selection — all courses used for recommendations.")
 
         if st.button("💾 Save Profile", use_container_width=True):
             ok, msg = _save_profile_form(student_name, edited_grades.to_dict("records"))
@@ -563,20 +562,6 @@ with st.sidebar:
         st.caption(f"Profile status: {_mode_badge(profile_mode)}")
         if not (_saved_courses or _saved_grades):
             st.caption("No synced profile found yet. Add courses manually or run a live refresh.")
-
-    st.divider()
-
-    if st.button("🔄 Refresh Electives", use_container_width=True):
-        from tum_pulse.agents.advisor import get_electives
-        _edb = SQLiteMemory()
-        _fresh = get_electives(_edb, force_refresh=True)
-        _edb.save_profile("electives_count", len(_fresh))
-        st.session_state.electives_mode = _derive_electives_mode(len(_fresh))
-        if len(_fresh) > 15:
-            st.success(f"Loaded {len(_fresh)} live electives.")
-        else:
-            st.warning(f"Loaded {len(_fresh)} electives. This still looks like demo/sample coverage.")
-        st.rerun()
 
     st.divider()
 
@@ -735,44 +720,22 @@ with tab_deadlines:
     st.markdown(f"<h2 style='color:{TUM_DARK_BLUE};margin-bottom:4px'>📅 Upcoming Deadlines</h2>", unsafe_allow_html=True)
     st.caption("TUM Easy shows whether each source is live, cached, or demo so you know how trustworthy the data is.")
 
-    col_btn, col_status = st.columns([2, 5])
-    with col_btn:
-        refresh = st.button("🔄 Refresh from TUM systems", use_container_width=True, type="primary")
-
-    if refresh:
-        with st.spinner("Logging in and scraping TUMonline, Moodle, Confluence…"):
-            st.session_state.watcher_running = True
-            agent = WatcherAgent()
-            summary = agent.run()
-            st.session_state.watcher_status = agent.status
-            st.session_state.last_refreshed = datetime.now().strftime("%H:%M:%S")
-            st.session_state.watcher_message = summary
-            st.session_state.watcher_data_mode = _derive_deadlines_mode(
-                agent.status,
-                bool(SQLiteMemory().get_upcoming_deadlines(days=120)),
-            )
-            st.session_state.watcher_running = False
-        if st.session_state.watcher_data_mode == "live":
-            st.success("Refresh complete — live data loaded.")
-        elif st.session_state.watcher_data_mode == "cached":
-            st.warning("Refresh finished, but TUM Easy is still relying on cached deadlines.")
-        else:
-            st.warning("Refresh finished, but some sources are still in demo/fallback mode.")
-        st.rerun()
-
-    with col_status:
-        st.markdown(f"**Overall mode:** {_mode_badge(st.session_state.watcher_data_mode)}")
-        if st.session_state.watcher_status:
-            _BADGE = {"live": "🟢 live", "mock": "🟠 demo", "skipped": "⚫ skipped", "not run": "⚪ not run"}
-            parts = [
-                f"**{src.title()}** — {_BADGE.get(state, state)}"
-                for src, state in st.session_state.watcher_status.items()
-            ]
-            st.markdown("   ·   ".join(parts))
+    if st.session_state.watcher_running:
+        st.info("⏳ Syncing data from TUM systems in the background…")
+    elif st.session_state.watcher_status:
+        _BADGE = {
+            "live": "🟢 live", "mock": "🟠 demo",
+            "skipped": "⚫ skipped", "not run": "⚪ not run",
+        }
+        parts = [
+            f"**{src.title()}** — {_BADGE.get(state, state)}"
+            for src, state in st.session_state.watcher_status.items()
+        ]
+        st.caption("   ·   ".join(parts))
         if st.session_state.last_refreshed:
-            st.caption(f"Last refreshed at {st.session_state.last_refreshed}")
-        if st.session_state.watcher_message:
-            st.caption(st.session_state.watcher_message)
+            st.caption(f"Last synced at {st.session_state.last_refreshed}")
+    else:
+        st.caption("⏳ Syncing in background on first load…")
 
     st.divider()
 
@@ -857,6 +820,18 @@ with tab_zhs:
     st.markdown(f"<h2 style='color:{TUM_DARK_BLUE};margin-bottom:4px'>🏃 ZHS Sport Registration</h2>", unsafe_allow_html=True)
     st.caption("Search and register for sport courses at ZHS München using your TUM SSO credentials.")
 
+    # City filter
+    ZHS_CITIES = [
+        "München", "Garching", "Weihenstephan", "Straubing",
+        "Heilbronn", "Starnberg", "Singapur", "Freising",
+    ]
+    selected_cities = st.multiselect(
+        "Filter by city (leave empty for all)",
+        options=ZHS_CITIES,
+        default=[],
+        placeholder="Select one or more cities…",
+    )
+
     col_search, col_btn = st.columns([4, 1])
     with col_search:
         sport_query = st.text_input(
@@ -875,10 +850,21 @@ with tab_zhs:
             connector = ZHSConnector()
             result = connector.run(ZHS_USERNAME, ZHS_PASSWORD, sport_query, register_first=False)
 
+        all_slots = result.get("slots", [])
+
+        # Apply city filter if any cities selected
+        if selected_cities:
+            city_lower = [c.lower() for c in selected_cities]
+            all_slots = [
+                s for s in all_slots
+                if any(city in (s.location or "").lower() for city in city_lower)
+            ]
+
         st.session_state.zhs_search_done = True
-        st.session_state.zhs_slots = result.get("slots", [])
+        st.session_state.zhs_slots = all_slots
         st.session_state.zhs_last_query = sport_query
         st.session_state.zhs_reg_result = None
+        st.session_state.zhs_selected_cities = selected_cities
 
         if result["logged_in"]:
             st.success(f"✅ Logged into ZHS — {result['message']}")
@@ -892,10 +878,15 @@ with tab_zhs:
         if not slots:
             st.info(f"No courses found for '{query}'. Try a different keyword.")
         else:
-            st.markdown(f"<h3 style='color:{TUM_DARK_BLUE}'>Found {len(slots)} slot(s) for '{query}'</h3>", unsafe_allow_html=True)
+            city_note = f" in {', '.join(st.session_state.get('zhs_selected_cities', []))}" if st.session_state.get('zhs_selected_cities') else ""
+            st.markdown(f"<h3 style='color:{TUM_DARK_BLUE}'>Found {len(slots)} slot(s) for '{query}'{city_note}</h3>", unsafe_allow_html=True)
 
             for i, slot in enumerate(slots):
-                spots_color = "#1a7f37" if slot.spots_left > 5 else "#d97706" if slot.spots_left > 0 else "#cf222e"
+                spots_color = (
+                    "#1a7f37" if slot.spots_left > 5 else
+                    "#d97706" if slot.spots_left > 0 else
+                    "#cf222e"
+                )
                 with st.container():
                     st.markdown(f"""
                     <div class='tum-card' style='display:flex;justify-content:space-between;align-items:center'>

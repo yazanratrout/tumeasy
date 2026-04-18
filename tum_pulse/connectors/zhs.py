@@ -140,6 +140,41 @@ class ZHSConnector:
         time_str = f"{time_match.group(2)}–{time_match.group(3)}" if time_match else ""
 
         slug = offer.get("slug", "")
+
+        # Calculate spots from capacity fields if available
+        max_p = offer.get("maxParticipants")
+        cur_p = offer.get("currentParticipants")
+        if max_p is not None and cur_p is not None:
+            try:
+                spots = int(max_p) - int(cur_p)
+                spots_left = max(0, spots)
+            except (TypeError, ValueError):
+                spots_left = 0
+        else:
+            # Try parsing from description HTML as fallback
+            # ZHS sometimes shows "X freie Plätze" or "X/Y" in description
+            spots_left = 0  # default to 0 if no availability info found
+            free_match = re.search(
+                r"(\d+)\s*(?:freie?\s*Pl[äa]tze?|free\s*spots?|available)",
+                desc_text,
+                re.IGNORECASE,
+            )
+            if free_match:
+                try:
+                    spots_left = int(free_match.group(1))
+                except ValueError:
+                    spots_left = 0
+            else:
+                # Try "X/Y" pattern (booked/total)
+                ratio_match = re.search(r"(\d+)\s*/\s*(\d+)", desc_text)
+                if ratio_match:
+                    try:
+                        booked = int(ratio_match.group(1))
+                        total = int(ratio_match.group(2))
+                        spots_left = max(0, total - booked)
+                    except ValueError:
+                        spots_left = 0
+
         return SportSlot(
             id=offer["id"],
             title=offer["name"],
@@ -147,7 +182,7 @@ class ZHSConnector:
             day=day,
             time=time_str,
             location=location,
-            spots_left=-1,  # not exposed via GraphQL; -1 = unknown
+            spots_left=spots_left,
             url=f"{_ZHS_BASE}/de/kurse/{slug}",
         )
 
