@@ -115,7 +115,6 @@ class LearningBuddyAgent:
             List of local file paths to downloaded files.
         """
         from playwright.sync_api import sync_playwright
-        from bs4 import BeautifulSoup
 
         print(f"[LearningBuddy] Attempting real Moodle download for '{course_name}'...")
         Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -148,25 +147,80 @@ class LearningBuddyAgent:
                     local_paths: list[str] = []
 
                     if course_id:
-                        # Step 4: Scrape course page for file links
+                        # Step 4: Use Playwright to render the course page
+                        # (Moodle loads file links via JS — requests sees empty page)
                         course_url = f"{MOODLE_BASE_URL}/course/view.php?id={course_id}"
-                        print(f"[LearningBuddy] Scraping course page: {course_url}")
+                        print(f"[LearningBuddy] Navigating Playwright to course page: {course_url}")
 
-                        resp = session.get(course_url, timeout=15)
-                        soup = BeautifulSoup(resp.text, "lxml")
+                        page.goto(course_url, timeout=20_000)
+                        page.wait_for_load_state("networkidle", timeout=15_000)
+
+                        # Expand all collapsed sections so all files are visible
+                        try:
+                            expand_buttons = page.locator(
+                                ".collapsed, [data-toggle='collapse'], "
+                                "button.sectiontoggle, .course-section-header"
+                            ).all()
+                            for btn in expand_buttons[:20]:
+                                try:
+                                    btn.click(timeout=1000)
+                                    page.wait_for_timeout(300)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        page.wait_for_timeout(2000)
+
+                        # Extract ALL links from the rendered page
+                        all_links = page.evaluate("""() => {
+                            const links = [];
+                            document.querySelectorAll('a[href]').forEach(a => {
+                                links.push({
+                                    href: a.href,
+                                    text: a.textContent.trim().substring(0, 100)
+                                });
+                            });
+                            return links;
+                        }""")
 
                         pdf_links: list[dict] = []
                         seen_urls: set[str] = set()
-                        for link in soup.find_all("a", href=True):
+                        for link in all_links:
                             href = link.get("href", "")
-                            text = link.get_text(strip=True)
-                            if "pluginfile.php" in href and href not in seen_urls:
-                                ext = Path(href.split("?")[0]).suffix.lower()
-                                if ext in (".pdf", ".pptx", ".ppt", ""):
-                                    pdf_links.append({"url": href, "name": text or Path(href).name})
-                                    seen_urls.add(href)
+                            text = link.get("text", "")
 
-                        print(f"[LearningBuddy] Found {len(pdf_links)} files on course page")
+                            is_file = (
+                                "pluginfile.php" in href or
+                                "mod/resource" in href or
+                                "mod/folder" in href
+                            )
+                            if not is_file or href in seen_urls:
+                                continue
+
+                            # Follow mod/resource links to get actual file URL
+                            if "mod/resource" in href and "pluginfile" not in href:
+                                try:
+                                    page.goto(href, timeout=10_000)
+                                    page.wait_for_load_state("networkidle", timeout=8_000)
+                                    final_url = page.url
+                                    if "pluginfile.php" in final_url:
+                                        href = final_url
+                                        text = text or Path(final_url.split("?")[0]).name
+                                    page.go_back(timeout=8_000)
+                                    page.wait_for_load_state("networkidle", timeout=8_000)
+                                except Exception:
+                                    pass
+
+                            ext = Path(href.split("?")[0]).suffix.lower()
+                            if ext in (".pdf", ".pptx", ".ppt", ".docx", ""):
+                                pdf_links.append({
+                                    "url": href,
+                                    "name": text or Path(href.split("?")[0]).name,
+                                })
+                                seen_urls.add(href)
+
+                        print(f"[LearningBuddy] Found {len(pdf_links)} files via Playwright")
 
                         def _classify(name: str) -> int:
                             n = name.lower()
@@ -178,24 +232,43 @@ class LearningBuddyAgent:
 
                         pdf_links.sort(key=lambda x: _classify(x["name"]))
 
-                        # Step 5: Download up to 10 files
+                        # Step 5: Download files using Playwright (handles auth cookies)
                         for file_info in pdf_links[:10]:
                             url = file_info["url"]
-                            safe_name = re.sub(r"[^\w\-_.]", "_", file_info["name"])[:80]
-                            if not safe_name.endswith(".pdf"):
+                            raw_name = file_info["name"] or Path(url.split("?")[0]).name
+                            safe_name = re.sub(r"[^\w\-_. ]", "_", raw_name).strip()[:80]
+                            if not any(safe_name.endswith(ext) for ext in
+                                       (".pdf", ".pptx", ".ppt", ".docx")):
                                 safe_name += ".pdf"
                             save_path = str(Path(DATA_DIR) / safe_name)
 
                             try:
-                                dl = session.get(url, timeout=30, stream=True)
-                                dl.raise_for_status()
-                                with open(save_path, "wb") as fh:
-                                    for chunk in dl.iter_content(chunk_size=8192):
-                                        fh.write(chunk)
+                                with page.expect_download(timeout=30_000) as dl_info:
+                                    page.goto(url, timeout=20_000)
+                                download = dl_info.value
+                                download.save_as(save_path)
                                 local_paths.append(save_path)
-                                print(f"[LearningBuddy] Downloaded: {safe_name}")
+                                size_kb = Path(save_path).stat().st_size // 1024
+                                print(f"[LearningBuddy] Downloaded: {safe_name} ({size_kb}KB)")
                             except Exception as exc:
-                                print(f"[LearningBuddy] Failed to download {url}: {exc}")
+                                # Fallback: requests with refreshed cookies
+                                try:
+                                    for cookie in page.context.cookies():
+                                        if "moodle" in cookie.get("domain", "").lower():
+                                            session.cookies.set(
+                                                cookie["name"],
+                                                cookie["value"],
+                                                domain=cookie.get("domain", ""),
+                                            )
+                                    resp = session.get(url, timeout=30, stream=True)
+                                    resp.raise_for_status()
+                                    with open(save_path, "wb") as fh:
+                                        for chunk in resp.iter_content(chunk_size=8192):
+                                            fh.write(chunk)
+                                    local_paths.append(save_path)
+                                    print(f"[LearningBuddy] Downloaded (session): {safe_name}")
+                                except Exception as exc2:
+                                    print(f"[LearningBuddy] Both download methods failed for {url}: {exc2}")
 
                     if local_paths:
                         print(f"[LearningBuddy] Successfully downloaded {len(local_paths)} files")
