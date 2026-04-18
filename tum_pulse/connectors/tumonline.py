@@ -188,6 +188,23 @@ class TUMonlineConnector:
 
             # Step 3: Fetch grades from achievements endpoint (confirmed working)
             try:
+                # Refresh token immediately before achievements fetch
+                try:
+                    fresh_token_data = page.evaluate("""async () => {
+                        const r = await fetch('/tumonline/ee/rest/auth/token/refresh', {
+                            method: 'POST',
+                            headers: {Accept: 'application/json', 'Content-Type': 'application/json'},
+                            body: '{}'
+                        });
+                        return r.ok ? await r.json() : {};
+                    }""")
+                    fresh_token = fresh_token_data.get("accessToken", "")
+                    if fresh_token:
+                        token_js = json.dumps(fresh_token)
+                        print("[TUMonlineConnector] Token refreshed before achievements fetch")
+                except Exception:
+                    pass  # use existing token_js
+
                 achievements_data = page.evaluate(f"""async () => {{
                     const r = await fetch(
                         '/tumonline/ee/rest/slc.xm.ac/achievements?$orderBy=acDate=descnf&$top=200',
@@ -198,6 +215,16 @@ class TUMonlineConnector:
 
                 resources = achievements_data.get("resource", [])
                 print(f"[TUMonlineConnector] Achievements endpoint returned {len(resources)} records")
+
+                # Log first non-null gradeDto before parsing loop
+                _grade_logged = False
+                for resource in resources:
+                    dto = resource.get("content", {}).get("achievementDto", {})
+                    grade_dto = dto.get("gradeDto")
+                    if grade_dto and not _grade_logged:
+                        print(f"[TUMonlineConnector] First non-null gradeDto: {json.dumps(grade_dto)}")
+                        _grade_logged = True
+                        break
 
                 for resource in resources:
                     content = resource.get("content", {})
@@ -250,6 +277,15 @@ class TUMonlineConnector:
                     first_dto = resources[0].get("content", {}).get("achievementDto", {})
                     print(f"[TUMonlineConnector] Sample achievement fields: {list(first_dto.keys())}")
                     print(f"[TUMonlineConnector] Sample dto (first 400 chars): {json.dumps(first_dto)[:400]}")
+
+                # Merge: add currently enrolled courses not yet in achievements
+                for course in result["enrolled"]:
+                    if course not in result["all_courses"]:
+                        result["all_courses"].append(course)
+
+                print(f"[TUMonlineConnector] Final: {len(result['all_courses'])} total courses "
+                      f"({len(result['enrolled'])} current + historical), "
+                      f"{len(result['grades'])} with grades")
 
             except Exception as exc:
                 print(f"[TUMonlineConnector] Achievements fetch failed: {exc}")
