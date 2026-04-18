@@ -277,7 +277,7 @@ class AdvisorAgent:
 
         # Try loading saved profile from DB first
         saved_grades = self.db.get_profile("grades")
-        saved_courses = self.db.get_profile("courses")
+        saved_courses = self.db.get_profile("courses") or self.db.get_profile("enrolled")
         if saved_grades:
             profile["grades"] = saved_grades
         if saved_courses:

@@ -98,16 +98,14 @@ with st.sidebar:
     student_name = st.text_input("Your Name", placeholder="Max Mustermann")
 
     _saved_courses = _db.get_profile("courses") or _DEFAULT_COURSES
+    _saved_grades = _db.get_profile("grades") or {
+        "Linear Algebra": 1.7,
+        "Analysis": 2.3,
+        "Algorithms and Data Structures": 2.0,
+        "Probability Theory": 2.7,
+    }
     default_profile = json.dumps(
-        {
-            "grades": {
-                "Linear Algebra": 1.7,
-                "Analysis": 2.3,
-                "Algorithms and Data Structures": 2.0,
-                "Probability Theory": 2.7,
-            },
-            "courses": _saved_courses,
-        },
+        {"grades": _saved_grades, "courses": _saved_courses},
         indent=2,
     )
     profile_json = st.text_area(
@@ -115,7 +113,7 @@ with st.sidebar:
         value=default_profile,
         height=200,
     )
-    st.caption("💡 Your enrolled courses are synced automatically from TUMonline.")
+    st.caption("💡 Courses and grades are synced automatically from TUMonline on each refresh.")
 
     if st.button("💾 Save Profile", use_container_width=True):
         try:

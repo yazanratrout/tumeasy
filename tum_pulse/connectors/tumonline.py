@@ -109,3 +109,140 @@ class TUMonlineConnector:
                 return []
             finally:
                 browser.close()
+
+    def get_enrolled_courses(self, page) -> dict:
+        """Scrape the student's courses and grades from TUMonline after login.
+
+        Navigates to the student's course/grade pages and extracts currently
+        enrolled courses and completed courses with grades.
+
+        Returns:
+            dict with keys:
+              "enrolled": list of str (current semester course names)
+              "grades": dict of {course_name: grade_float} (completed courses)
+              "all_courses": list of str (union of enrolled + completed course names)
+        """
+        result: dict = {"enrolled": [], "grades": {}, "all_courses": []}
+
+        # --- Current semester courses ---
+        for path in [
+            "/wbStELP.cbSEL",
+            "/wbKUVKU.cbSEL",
+            "/wbStELPV.cbSEL",
+        ]:
+            try:
+                page.goto(self.BASE + path, timeout=15_000)
+                page.wait_for_load_state("networkidle", timeout=10_000)
+
+                rows = page.locator("table tr, .listresult tr, .list tr").all()
+                for row in rows:
+                    text = row.inner_text().strip()
+                    if not text or len(text) < 5:
+                        continue
+                    if any(t in text for t in ["VO", "UE", "SE", "PR", "MA", "IN", "EI"]):
+                        cells = row.locator("td").all()
+                        if len(cells) >= 2:
+                            course_name = cells[1].inner_text().strip()
+                            if course_name and len(course_name) > 3:
+                                result["enrolled"].append(course_name)
+
+                if result["enrolled"]:
+                    print(f"[TUMonlineConnector] Found {len(result['enrolled'])} enrolled courses")
+                    break
+            except Exception as exc:
+                print(f"[TUMonlineConnector] Could not fetch courses from {path}: {exc}")
+                continue
+
+        # --- Grades / transcript ---
+        for path in [
+            "/wbStuPla.cbStuProgress",
+            "/wbStuPla.cbPruefungen",
+            "/wbStELPV.cbSELPruefungen",
+        ]:
+            try:
+                page.goto(self.BASE + path, timeout=15_000)
+                page.wait_for_load_state("networkidle", timeout=10_000)
+
+                rows = page.locator("table tr, .listresult tr").all()
+                for row in rows:
+                    cells = row.locator("td").all()
+                    if len(cells) < 3:
+                        continue
+                    texts = [c.inner_text().strip() for c in cells]
+
+                    course_name = ""
+                    grade = None
+                    for t in texts:
+                        if len(t) > 5 and not t.replace(".", "").replace(",", "").isdigit():
+                            course_name = t
+                        try:
+                            val = float(t.replace(",", "."))
+                            if 1.0 <= val <= 5.0:
+                                grade = val
+                        except ValueError:
+                            pass
+
+                    if course_name and grade is not None:
+                        result["grades"][course_name] = grade
+
+                if result["grades"]:
+                    print(f"[TUMonlineConnector] Found {len(result['grades'])} graded courses")
+                    break
+            except Exception as exc:
+                print(f"[TUMonlineConnector] Could not fetch grades from {path}: {exc}")
+                continue
+
+        all_names = list(result["enrolled"])
+        for name in result["grades"]:
+            if name not in all_names:
+                all_names.append(name)
+        result["all_courses"] = all_names
+
+        return result
+
+    def scrape_with_courses(self, username: str, password: str) -> dict:
+        """Full scrape: login once, then fetch deadlines AND courses/grades.
+
+        More efficient than separate calls since login happens only once.
+
+        Returns:
+            dict with keys:
+              "deadlines": list of deadline dicts
+              "courses": dict from get_enrolled_courses()
+        """
+        from playwright.sync_api import sync_playwright
+
+        _empty = {"deadlines": [], "courses": {"enrolled": [], "grades": {}, "all_courses": []}}
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                if not self.login(page, username, password):
+                    return _empty
+                deadlines = self.get_deadlines(page)
+                courses = self.get_enrolled_courses(page)
+                return {"deadlines": deadlines, "courses": courses}
+            except Exception as exc:
+                print(f"[TUMonlineConnector] scrape_with_courses error: {exc}")
+                return _empty
+            finally:
+                browser.close()
+
+if __name__ == "__main__":
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    username = os.getenv("TUM_USERNAME", "")
+    password = os.getenv("TUM_PASSWORD", "")
+    if not username or not password:
+        print("Set TUM_USERNAME and TUM_PASSWORD in .env to test")
+    else:
+        result = TUMonlineConnector().scrape_with_courses(username, password)
+        print(f"Deadlines ({len(result['deadlines'])}):")
+        for dl in result["deadlines"][:5]:
+            print(f"  [{dl['deadline_date']}] {dl['title']}")
+        courses = result["courses"]
+        print(f"\nEnrolled ({len(courses['enrolled'])}): {courses['enrolled'][:5]}")
+        print(f"Grades ({len(courses['grades'])}): {dict(list(courses['grades'].items())[:5])}")
+        print(f"All courses ({len(courses['all_courses'])}): {courses['all_courses'][:5]}")
