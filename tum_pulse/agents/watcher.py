@@ -179,7 +179,13 @@ class WatcherAgent:
 
         filtered = []
         for dl in deadlines:
-            if dl.get("title", "").startswith("Exam Registration Deadline"):
+            # Always keep global/admin deadlines
+            if (
+                dl.get("title", "").startswith("Exam Registration Deadline") or
+                dl.get("course") == "TUM Administration" or
+                dl.get("title", "").startswith(("Course Registration", "Re-enrollment",
+                                                 "Semester Contribution", "Exmatriculation"))
+            ):
                 filtered.append(dl)
                 continue
 
@@ -252,6 +258,84 @@ class WatcherAgent:
     # Scrapers — TUMonline
     # ------------------------------------------------------------------
 
+    def scrape_tumonline_semester_deadlines(self) -> list[dict]:
+        """Fetch semester-level registration, re-enrollment and payment deadlines.
+
+        Reads the current semester object from the NAT API which contains:
+        - Course registration windows (Belegfrist)
+        - Re-enrollment deadline (Rückmeldung)
+        - Semester contribution payment deadline (Beitragszahlung)
+
+        Returns:
+            List of deadline dicts.
+        """
+        deadlines: list[dict] = []
+        try:
+            resp = requests.get(f"{TUM_API_BASE}/api/v1/semesters", params={"limit": 20}, timeout=10)
+            resp.raise_for_status()
+            semesters = resp.json()
+            current = next((s for s in semesters if s.get("is_current")), None)
+            if not current:
+                return []
+
+            now = datetime.now()
+            semester_tag = current.get("semester_tag", "Current Semester")
+
+            # Field name pairs: (api_field, human label, type)
+            date_fields = [
+                ("enrollment_start",        "enrollment_end",          "Course Registration Opens",   "tumonline"),
+                ("enrollment_end",          None,                       "Course Registration Closes (Belegfrist)", "tumonline"),
+                ("reenrollment_start",      "reenrollment_end",         "Re-enrollment Opens (Rückmeldung)", "tumonline"),
+                ("reenrollment_end",        None,                       "Re-enrollment Deadline (Rückmeldung)", "tumonline"),
+                ("contribution_deadline",   None,                       "Semester Contribution Payment (Beitrag)", "tumonline"),
+                ("exmatriculation_deadline",None,                       "Exmatriculation Deadline",   "tumonline"),
+            ]
+
+            for start_field, _end_field, label, source in date_fields:
+                raw = current.get(start_field) or current.get(_end_field if _end_field else "")
+                if not raw:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(str(raw)[:10])
+                    if dt.date() < now.date():
+                        continue
+                    deadlines.append({
+                        "title": f"{label}: {semester_tag}",
+                        "course": "TUM Administration",
+                        "deadline_date": dt.strftime("%Y-%m-%d"),
+                        "source": source,
+                    })
+                    print(f"[WatcherAgent] Semester deadline: {label} → {dt.strftime('%Y-%m-%d')}")
+                except (ValueError, TypeError):
+                    continue
+
+            # Also check top-level keys that might be nested differently
+            for key, val in current.items():
+                if "deadline" in key.lower() or "end" in key.lower() or "frist" in key.lower():
+                    if isinstance(val, str) and len(val) >= 10:
+                        try:
+                            dt = datetime.fromisoformat(val[:10])
+                            if dt.date() < now.date():
+                                continue
+                            human = key.replace("_", " ").title()
+                            # Skip if we already have this field
+                            if any(human.lower() in d["title"].lower() for d in deadlines):
+                                continue
+                            if any(w in key.lower() for w in ["deadline", "end", "frist", "reenroll", "enroll", "contribution"]):
+                                deadlines.append({
+                                    "title": f"{human}: {semester_tag}",
+                                    "course": "TUM Administration",
+                                    "deadline_date": dt.strftime("%Y-%m-%d"),
+                                    "source": "tumonline",
+                                })
+                        except (ValueError, TypeError):
+                            continue
+
+        except Exception as exc:
+            print(f"[WatcherAgent] Semester deadline fetch failed: {exc}")
+
+        return deadlines
+
     def scrape_tumonline(self) -> list[dict]:
         """Return deadline data from the TUM NAT public REST API (primary path).
 
@@ -265,7 +349,11 @@ class WatcherAgent:
             print(f"[WatcherAgent] Using REAL TUMonline API ({TUM_API_BASE})")
 
             courses_data = self._get_enrolled_courses()
-            enrolled_courses = courses_data.get("all_courses", [])
+            # Use current-semester enrolled only — not historical achievements
+            enrolled_courses = (
+                courses_data.get("enrolled") or
+                courses_data.get("all_courses", [])
+            )
             self._last_enrolled_courses = enrolled_courses
 
             semester_key = self._get_current_semester_key()
@@ -365,10 +453,7 @@ class WatcherAgent:
         """Secondary TUMonline scraper: Playwright login to campus.tum.de.
 
         Called by run() only when the NAT REST API returns 0 results.
-        Uses TUMonlineConnector (Keycloak → Shibboleth login + wbEeHooks).
-
-        Returns:
-            List of deadline dicts, or mock data on failure.
+        Returns empty list (never mock) if login or scraping fails.
         """
         try:
             from tum_pulse.connectors.tumonline import TUMonlineConnector
@@ -378,12 +463,11 @@ class WatcherAgent:
                 print(f"[WatcherAgent] TUMonlineConnector: {len(results)} deadline(s)")
                 self.status["tumonline"] = "live"
                 return results
-            self.status["tumonline"] = "mock"
-            return _mock_tumonline()
+            print("[WatcherAgent] TUMonlineConnector returned 0 results")
+            return []
         except Exception as exc:
-            print(f"[WatcherAgent] TUMonlineConnector failed ({exc}) — Using MOCK data")
-            self.status["tumonline"] = "mock"
-            return _mock_tumonline()
+            print(f"[WatcherAgent] TUMonlineConnector failed: {exc}")
+            return []
 
     # ------------------------------------------------------------------
     # Scrapers — Moodle
@@ -420,18 +504,24 @@ class WatcherAgent:
         except Exception as exc:
             print(f"[WatcherAgent] MoodleConnector failed ({exc}) — trying MoodleScraper ...")
 
-        # --- 2. Playwright DOM parsing via MoodleScraper (yazan fallback) ---
+        # --- 2. Playwright DOM parsing via MoodleScraper (fallback) ---
         try:
             from tum_pulse.tools.moodle_scraper import MoodleScraper
             scraper = MoodleScraper()
             deadlines = scraper.get_deadlines_from_calendar()
-            print(f"[WatcherAgent] MoodleScraper: {len(deadlines)} deadline(s)")
-            self.status["moodle"] = "live"
-            return deadlines
+            # Reject sample/mock deadlines that come from the fallback path
+            real = [d for d in deadlines if d.get("source") != "mock"]
+            if real:
+                print(f"[WatcherAgent] MoodleScraper: {len(real)} deadline(s)")
+                self.status["moodle"] = "live"
+                return real
+            print("[WatcherAgent] MoodleScraper returned only sample data — skipping")
+            self.status["moodle"] = "failed"
+            return []
         except Exception as exc:
-            print(f"[WatcherAgent] MoodleScraper failed ({exc}) — Using MOCK data")
-            self.status["moodle"] = "mock"
-            return _mock_moodle()
+            print(f"[WatcherAgent] MoodleScraper failed: {exc}")
+            self.status["moodle"] = "failed"
+            return []
 
     # ------------------------------------------------------------------
     # Scrapers — Confluence
@@ -561,12 +651,27 @@ class WatcherAgent:
             if nat_deadlines:
                 all_deadlines.extend(nat_deadlines)
                 if self._last_enrolled_courses:
-                    self.db.save_profile("courses", self._last_enrolled_courses)
+                    # Save current-semester enrolled courses (not historical)
+                    self.db.save_profile("enrolled", self._last_enrolled_courses)
+                    # Merge into courses list without clobbering historical grades
+                    existing = self.db.get_profile("courses") or []
+                    merged = list(dict.fromkeys(self._last_enrolled_courses + existing))
+                    self.db.save_profile("courses", merged)
             else:
                 pw_deadlines = self.scrape_tumonline_playwright()
                 all_deadlines.extend(pw_deadlines)
         except Exception as exc:
             print(f"[WatcherAgent] TUMonline scrape error: {exc}")
+
+        # TUMonline — semester admin deadlines (Belegfrist, Rückmeldung, Beitrag)
+        try:
+            sem_deadlines = self.scrape_tumonline_semester_deadlines()
+            all_deadlines.extend(sem_deadlines)
+            # These are always "live" since they come from the public NAT API
+            if sem_deadlines:
+                self.status["tumonline"] = "live"
+        except Exception as exc:
+            print(f"[WatcherAgent] Semester deadline scrape error: {exc}")
 
         # Moodle
         try:

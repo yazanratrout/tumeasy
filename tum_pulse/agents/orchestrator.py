@@ -1,4 +1,9 @@
-"""LangGraph orchestrator — routes user input to the correct TUM Pulse agent."""
+"""LangGraph orchestrator — routes user input to the correct TUM Pulse agent.
+
+OPTIMIZED: Uses fast heuristic routing (keyword + context signals) instead of LLM.
+This reduces routing latency from ~1000ms to <10ms while delegating complex
+reasoning to the agents themselves.
+"""
 
 import json
 import re
@@ -9,7 +14,7 @@ from langgraph.graph import END, StateGraph
 
 from tum_pulse.agents.advisor import AdvisorAgent
 from tum_pulse.agents.executor import ExecutorAgent
-from tum_pulse.agents.learning_buddy import LearningBuddyAgent
+from tum_pulse.agents.learning_buddy_v2 import SmartLearningBuddy
 from tum_pulse.agents.watcher import WatcherAgent
 from tum_pulse.memory.database import SQLiteMemory
 from tum_pulse.tools.bedrock_client import BedrockClient
@@ -30,94 +35,98 @@ class OrchestratorState(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# Routing helpers
+# Fast heuristic routing (no LLM)
 # ---------------------------------------------------------------------------
 
-_INTENT_PROMPT_TEMPLATE = """You are an intelligent routing assistant for a TUM student app.
+# Keyword patterns for each intent category
+_INTENT_KEYWORDS = {
+    "deadlines": {
+        "keywords": [
+            "deadline", "deadlines", "submission",
+            "due", "when is", "when are", "upcoming", "coming up",
+            "when do i", "when do we", "final exam", "midterm",
+        ],
+        "priority": 3,  # Higher priority keyword match
+    },
+    "zhs_registration": {
+        "keywords": [
+            "register", "registration", "zhs", "sport", "course",
+            "activity", "sign up", "enroll", "join", "class",
+            "badminton", "tennis", "yoga", "gym", "swimming",
+        ],
+        "priority": 3,
+    },
+    "elective_advice": {
+        "keywords": [
+            "elective", "course recommendation", "recommend",
+            "should i take", "which course", "what course",
+            "next semester", "choose", "selection", "major",
+            "specialization", "track"
+        ],
+        "priority": 2,
+    },
+    "exam_plan": {
+        "keywords": [
+            "prepare", "preparation", "study", "studying", "studying for",
+            "past papers", "practice", "revision", "help prepare",
+            "exam help", "study plan", "learning", "tutoring",
+            "explanation", "exam prep", "help studying"
+        ],
+        "priority": 2,
+    },
+}
 
-USER MESSAGE:
-{user_input}
 
-STUDENT CONTEXT:
-Courses: {courses}
-Weak subjects (grades > 2.3): {weak_subjects}
-Upcoming deadlines (next 7 days): {upcoming}
-Time pressure: {time_pressure}
-Recent conversation: {history}
+def _classify_intent_heuristic(user_input: str, context: dict) -> str:
+    """Fast heuristic routing based on keywords and context signals.
 
-Classify the message into exactly ONE of:
-- deadlines        (asking about upcoming exams, assignments, submission deadlines)
-- zhs_registration (wants to register for a ZHS sport course or activity)
-- elective_advice  (wants course recommendations or help choosing electives)
-- exam_plan        (wants help preparing for an exam, study plans, past papers)
-- general          (anything else: greetings, factual questions, small talk)
-
-ROUTING RULES:
-- If the user uses "it", "this", "that" → resolve via conversation history
-- If weak subjects or upcoming exams are involved → prefer exam_plan
-- If deadlines are urgent (time_pressure=high) → prefer deadlines
-
-Return ONLY valid JSON, nothing else:
-{{
-  "intent": "<one of the 5 categories>",
-  "confidence": <0.0 to 1.0>,
-  "reason": "<one sentence explanation>"
-}}"""
-
-
-def _classify_intent(
-    user_input: str, context: dict, bedrock: BedrockClient
-) -> str:
-    """Classify user intent using Claude with full student context.
+    This avoids the ~1000ms LLM call by using keyword matching + context rules.
+    Complex reasoning is deferred to the agents themselves.
 
     Args:
         user_input: The raw message from the student.
-        context: Rich context dict from _build_context().
-        bedrock: Bedrock client for Claude invocation.
+        context: Context dict with courses, grades, deadlines, time_pressure.
 
     Returns:
         One of: deadlines, zhs_registration, elective_advice,
         exam_plan, general.
     """
-    prompt = _INTENT_PROMPT_TEMPLATE.format(
-        user_input=user_input,
-        courses=context.get("courses", []),
-        weak_subjects=context.get("weak_subjects", []),
-        upcoming=context.get("upcoming", []),
-        time_pressure=context.get("time_pressure", "unknown"),
-        history=context.get("history", []),
-    )
-    raw = bedrock.invoke(prompt, max_tokens=150).strip()
+    user_lower = user_input.lower()
+    scores = {}
 
-    try:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            intent = data.get("intent", "general").strip().lower()
-            valid = {
-                "deadlines", "zhs_registration",
-                "elective_advice", "exam_plan", "general",
-            }
-            return intent if intent in valid else "general"
-    except Exception:
-        pass
+    # 1. Keyword matching
+    for intent, config in _INTENT_KEYWORDS.items():
+        keyword_count = sum(
+            1 for kw in config["keywords"] if kw in user_lower
+        )
+        if keyword_count > 0:
+            scores[intent] = keyword_count * config["priority"]
 
-    # Fallback: scan raw text for any valid category keyword
-    valid = {
-        "deadlines", "zhs_registration",
-        "elective_advice", "exam_plan", "general",
-    }
-    for cat in valid:
-        if cat in raw.lower():
-            return cat
+    # 2. Context-based signals
+    time_pressure = context.get("time_pressure", "unknown")
+    weak_subjects = context.get("weak_subjects", [])
+    upcoming = context.get("upcoming", [])
+
+    # High time pressure + upcoming deadlines → boost deadlines
+    if time_pressure == "high" and upcoming:
+        scores["deadlines"] = scores.get("deadlines", 0) + 2
+
+    # Weak subjects + mention of exam/study → boost exam_plan
+    if weak_subjects and any(w in user_lower for w in weak_subjects):
+        scores["exam_plan"] = scores.get("exam_plan", 0) + 1.5
+
+    # 3. Return highest-scoring intent, fallback to general
+    if scores:
+        return max(scores, key=scores.get)
+
     return "general"
 
 
 def _build_context(state: dict | None = None) -> dict:
-    """Build rich context from SQLite profile and conversation state.
+    """Build context from SQLite profile for routing decisions.
 
-    Computes weak subjects, time pressure from upcoming deadlines,
-    and recent conversation history for context-aware routing.
+    Computes weak subjects, time pressure from upcoming deadlines, etc.
+    This is fast and used only for heuristic routing, not LLM calls.
 
     Args:
         state: Current orchestrator state (used to extract message history).
@@ -183,14 +192,13 @@ def _build_context(state: dict | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 def router_node(state: OrchestratorState) -> OrchestratorState:
-    """Classify intent with full student context and store routing decision.
+    """Fast heuristic routing without LLM call.
 
-    Builds context first (so time pressure and weak subjects are available
-    to influence routing), then classifies intent using that context.
+    Builds context and classifies intent using keywords + context signals,
+    avoiding the ~1000ms LLM latency. Complex reasoning is handled by agents.
     """
-    bedrock = BedrockClient()
     context = _build_context(state)
-    intent = _classify_intent(state["user_input"], context, bedrock)
+    intent = _classify_intent_heuristic(state["user_input"], context)
     return {**state, "agent_called": intent, "context": context}
 
 
@@ -211,9 +219,12 @@ def watcher_node(state: OrchestratorState) -> OrchestratorState:
 
 
 def executor_node(state: OrchestratorState) -> OrchestratorState:
-    """Delegate to ExecutorAgent for ZHS registration tasks."""
+    """Delegate to ExecutorAgent for ZHS registration tasks.
+    
+    Passes context for enrollment info and deadline context.
+    """
     agent = ExecutorAgent()
-    response = agent.run(state["user_input"])
+    response = agent.run(state["user_input"], context=state.get("context", {}))
     return {**state, "response": response}
 
 
@@ -225,21 +236,41 @@ def advisor_node(state: OrchestratorState) -> OrchestratorState:
 
 
 def learning_buddy_node(state: OrchestratorState) -> OrchestratorState:
-    """Delegate to LearningBuddyAgent for exam planning."""
-    agent = LearningBuddyAgent()
-    response = agent.run(state["user_input"], context=state.get("context", {}))
+    """Delegate to SmartLearningBuddy for study plans and lecture summaries.
+    
+    Uses cache for fast course/document selection, then generates summaries or plans.
+    """
+    try:
+        agent = SmartLearningBuddy()
+        response = agent.run(state["user_input"], context=state.get("context", {}))
+    except Exception as e:
+        response = f"[SmartLearningBuddy Error] {str(e)}"
     return {**state, "response": response}
 
 
 def general_node(state: OrchestratorState) -> OrchestratorState:
-    """Handle general questions directly via Claude."""
+    """Handle general questions directly via Claude.
+    
+    Passes context for personalized responses about courses and deadlines.
+    """
     bedrock = BedrockClient()
     system = (
         "You are TUM Pulse, a helpful AI assistant for TU Munich students. "
         "You help with deadlines, course recommendations, ZHS sport registration, and exam planning. "
         "Be concise, friendly, and accurate."
     )
-    response = bedrock.invoke(state["user_input"], system=system)
+    context = state.get("context", {})
+    context_str = ""
+    if context.get("courses"):
+        context_str += f"\nStudent's courses: {context['courses']}"
+    if context.get("weak_subjects"):
+        context_str += f"\nWeak subjects to strengthen: {context['weak_subjects']}"
+    
+    user_msg = state["user_input"]
+    if context_str:
+        user_msg = f"{user_msg}{context_str}"
+    
+    response = bedrock.invoke(user_msg, system=system)
     return {**state, "response": response}
 
 

@@ -307,14 +307,32 @@ class MoodleScraper:
                 file_type = ext.lstrip(".") if ext else "unknown"
                 if name:
                     files.append({"name": name, "url": href, "type": file_type})
-            return files if files else self.get_sample_data()
+            return files
         except Exception as exc:
             print(f"[MoodleScraper] get_course_files failed: {exc}")
-            return self.get_sample_data()
+            return []
 
     # ------------------------------------------------------------------
     # Download
     # ------------------------------------------------------------------
+
+    def _extract_text(self, file_path: str) -> str:
+        """Extract text from a local PDF or text file using PyMuPDF, falling back to plain read."""
+        try:
+            import fitz
+            doc = fitz.open(file_path)
+            text = "\n".join(page.get_text() for page in doc)
+            doc.close()
+            return text
+        except ImportError:
+            pass
+        except Exception as exc:
+            print(f"[MoodleScraper] PyMuPDF failed for {file_path}: {exc}")
+        try:
+            with open(file_path, "r", errors="ignore") as fh:
+                return fh.read()
+        except Exception as exc:
+            return f"[Could not read: {exc}]"
 
     def download_pdf(self, url: str, save_path: str) -> str:
         """Download a PDF from *url* and save to *save_path*.
@@ -343,23 +361,8 @@ class MoodleScraper:
     # ------------------------------------------------------------------
 
     def _sample_deadlines(self) -> list[dict]:
-        """Return mock deadline dicts used as fallback when auth is unavailable."""
-        from datetime import timedelta
-        today = datetime.now()
-        return [
-            {
-                "title": "Quiz: Probability Theory Chapter 3",
-                "course": "Introduction to Probability",
-                "deadline_date": (today + timedelta(days=2)).strftime("%Y-%m-%d"),
-                "source": "moodle",
-            },
-            {
-                "title": "Project Milestone 1",
-                "course": "Software Engineering",
-                "deadline_date": (today + timedelta(days=7)).strftime("%Y-%m-%d"),
-                "source": "moodle",
-            },
-        ]
+        """Return empty list — never show fake deadlines."""
+        return []
 
     def get_sample_data(self) -> list[dict]:
         """Return mock course files for demo purposes when auth is unavailable."""

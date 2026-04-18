@@ -1,0 +1,191 @@
+
+[2m2026-04-18T18:16:51.876773[0m [[32m[1minfo     [0m] [1mDeleted old log file: /home/ge94doc/.cognee/logs/2026-04-18_18-37-05.log[0m [[0m[1m[34mcognee.shared.logging_utils[0m][0m
+
+[2m2026-04-18T18:16:51.877268[0m [[32m[1minfo     [0m] [1mLog file created at: /home/ge94doc/.cognee/logs/2026-04-18_20-16-51.log[0m [[0m[1m[34mcognee.shared.logging_utils[0m][0m [36mlog_file[0m=[35m/home/ge94doc/.cognee/logs/2026-04-18_20-16-51.log[0m
+
+[2m2026-04-18T18:16:51.877467[0m [[33m[1mwarning  [0m] [1mCognee 1.0 changes: New API — remember/recall/forget/improve (V1 add/cognify/search still work). Session memory enabled by default (CACHING=false to disable). Multi-user access control on by default (ENABLE_BACKEND_ACCESS_CONTROL=false to disable). Agents (@cognee.agent) auto-verified on registration. See https://docs.cognee.ai/[0m [[0m[1m[34mcognee.shared.logging_utils[0m][0m
+
+[2m2026-04-18T18:16:51.877721[0m [[32m[1minfo     [0m] [1mLogging initialized           [0m [[0m[1m[34mcognee.shared.logging_utils[0m][0m [36mcognee_version[0m=[35m1.0.1[0m [36mdatabase_path[0m=[35m/home/ge94doc/tumeasy/.venv/lib/python3.10/site-packages/cognee/.cognee_system/databases[0m [36mos_info[0m=[35m'Linux 6.6.87.2-microsoft-standard-WSL2 (#1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025)'[0m [36mpython_version[0m=[35m3.10.12[0m [36mstructlog_version[0m=[35m25.5.0[0m
+
+[2m2026-04-18T18:16:51.878004[0m [[32m[1minfo     [0m] [1mDatabase storage: /home/ge94doc/tumeasy/.venv/lib/python3.10/site-packages/cognee/.cognee_system/databases[0m [[0m[1m[34mcognee.shared.logging_utils[0m][0m
+
+[2m2026-04-18T18:16:55.554662[0m [[31m[1merror    [0m] [1mInvalidConfigAttributeError: 'provider' is not a valid attribute of the configuration. (Status code: 400)[0m [[0m[1m[34mcognee.shared.logging_utils[0m][0m
+
+[1m[CogneeStore] LLM config failed: InvalidConfigAttributeError: 'provider' is not a valid attribute of the configuration. (Status code: 400)[0m
+
+[2m2026-04-18T18:16:55.561318[0m [[31m[1merror    [0m] [1mInvalidConfigAttributeError: 'provider' is not a valid attribute of the configuration. (Status code: 400)[0m [[0m[1m[34mcognee.shared.logging_utils[0m][0m
+
+[1m[CogneeStore] Embedding config failed: InvalidConfigAttributeError: 'provider' is not a valid attribute of the configuration. (Status code: 400)[0m
+
+[1m[CogneeStore] Configured with AWS Bedrock[0m
+
+[2m2026-04-18T18:16:58.641487[0m [[31m[1merror    [0m] [1mDatasetNotFoundError: No datasets found. (Status code: 404)[0m [[0m[1m[34mcognee.shared.logging_utils[0m][0m
+
+[1m[CogneeStore] search failed (tum_ge94doc_electives): DatasetNotFoundError: No datasets found. (Status code: 404)[0m
+
+[2m2026-04-18T18:17:04.485262[0m [[31m[1merror    [0m] [1mDatasetNotFoundError: No datasets found. (Status code: 404)[0m [[0m[1m[34mcognee.shared.logging_utils[0m][0m
+
+[1m[CogneeStore] search failed (tum_ge94doc_electives): DatasetNotFoundError: No datasets found. (Status code: 404)[0m
+
+======================================================================
+  TUM EASY - COMPREHENSIVE FEATURE TEST SUITE
+======================================================================
+
+======================================================================
+  DATABASE FEATURES TEST
+======================================================================
+
+  ✅ Saving registrations to database...
+     └─ Saved 3 registration attempts
+
+  ✅ Retrieving registration history...
+     └─ Retrieved 10 total entries
+     └─ Last 3 entries:
+        • REGISTER Machine Learning - success
+        • DEREGISTER Algorithms - pending
+        • REGISTER Analysis - failed
+
+  ✅ Saving profile data (time + interests)...
+     └─ Saved: time, interests, courses, grades
+
+  ✅ Retrieving profile data...
+     └─ Time availability: 25.0 hours/week
+     └─ Interests: Machine Learning, Data Science, Algorithms
+     └─ Courses: Analysis 1, Linear Algebra, Programming
+     └─ Grades: {'Analysis 1': 2.3, 'Linear Algebra': 1.7, 'Programming': 2.5}
+
+
+======================================================================
+  PROFILE MANAGEMENT TEST
+======================================================================
+
+  ✅ Saving complete student profile...
+     └─ Saved 5 profile fields
+
+  ✅ Retrieving complete profile...
+     └─ Name: Max Mustermann
+     └─ Courses: 4 items
+     └─ Grades: 4 entries
+     └─ Time: 22.0 hours/week
+     └─ Interests: 3 selected
+
+  ✅ Updating profile...
+     └─ Updated time: 30.0
+     └─ Updated interests: ['Machine Learning', 'AI', 'Systems']
+
+
+======================================================================
+  ADVISOR FEATURES TEST
+======================================================================
+
+  ✅ Testing time factor computation...
+     └─ Low availability (5h): {'easy': 0.1, 'medium': 0.0, 'hard': -0.1}
+     └─ High availability (35h): {'easy': 0.0, 'medium': 0.05, 'hard': 0.15}
+     └─ Difference shows time awareness ✓
+
+  ✅ Testing interests boost computation...
+     └─ Elective: Machine Learning
+     └─ Interests: ['Machine Learning', 'AI', 'Data Science']
+     └─ Interest boost score: 0.050
+     └─ Boost applied successfully ✓
+
+  ✅ Testing advisor.run() with profile...
+     └─ Response length: 486 characters
+     └─ Contains time mention: True
+     └─ Contains recommendations: True
+     └─ First 200 chars: **Elective Course Recommendations** _(from 1 TUM modules)_
+
+_(Available study time: ~20 hours/week)_
+
+
+**1. Machine Learning** (`IN2346`) ⭐ 0.292
+   ML basics
+   *Why this suits you:* ## Personalized ...
+
+
+======================================================================
+  TUM ONLINE EXECUTOR FEATURES TEST
+======================================================================
+
+  ✅ Testing course registration...
+     └─ Result: ✅ Registered for Machine Learning (IN2346)
+     └─ Success: True
+     └─ Action: register
+
+  ✅ Testing course deregistration...
+     └─ Result: ✅ Deregistered from Analysis (IN2001)
+     └─ Success: True
+     └─ Action: deregister
+
+  ✅ Testing natural language parsing...
+     └─ Command: 'register for Machine Learning'
+        Response: ✅ Registered for Machine Learning (IN2346)...
+     └─ Command: 'deregister from Advanced Algorithms'
+        Response: ℹ️ Please specify which course to register for (e.g., 'register for Ma...
+     └─ Command: 'show my registration history'
+        Response: 📋 **Registration History**...
+
+  ✅ Retrieving registration history...
+     └─ Total registrations: 10
+     └─ Most recent:
+        • register Machine Learning (pending)
+        • deregister Analysis (pending)
+
+
+======================================================================
+  COMPLETE INTEGRATION FLOW TEST
+======================================================================
+
+  ✅ Step 1: User saves profile...
+     └─ Profile saved ✓
+
+  ✅ Step 2: Advisor loads profile and computes recommendations...
+     └─ Loaded profile: 3 courses, 15.0h/week
+
+  ✅ Step 3: User gets recommendations...
+     └─ Response generated (1403 chars)
+     └─ Time consideration: True
+     └─ Interests considered: True
+
+  ✅ Step 4: User registers for course...
+     └─ Registration result: ✅ Registered for Machine Learning (IN2346)...
+
+  ✅ Step 5: Check registration history...
+     └─ Total registrations tracked: 10
+     └─ Latest: register Machine Learning
+
+
+======================================================================
+  DATA PERSISTENCE TEST
+======================================================================
+
+  ✅ Saving multiple data items...
+     └─ Saved 5 registration records
+
+  ✅ Verifying persistence...
+     └─ Retrieved 10 records
+     └─ Data persisted across calls ✓
+
+  ✅ Testing profile data persistence...
+     └─ Saved: test_key = {'data': 'test_value', 'number': 42}
+     └─ Retrieved: {'data': 'test_value', 'number': 42}
+     └─ Match: True ✓
+
+
+======================================================================
+  ✅ ALL TESTS COMPLETED SUCCESSFULLY
+======================================================================
+
+
+  Summary:
+  ✅ Database enhancements working
+  ✅ Profile management working
+  ✅ Advisor time factor working
+  ✅ Advisor interests boost working
+  ✅ TUM Online executor working
+  ✅ Registration history tracking working
+  ✅ Data persistence working
+  ✅ Complete integration flow working
+
+======================================================================
+

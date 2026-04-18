@@ -1,10 +1,9 @@
 """TUM Pulse — Streamlit chat interface entry point."""
 
-import json
 import os
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -352,13 +351,6 @@ from tum_pulse.agents.orchestrator import run as orchestrator_run  # noqa: E402
 from tum_pulse.agents.watcher import WatcherAgent                   # noqa: E402
 from tum_pulse.memory.database import SQLiteMemory                  # noqa: E402
 
-_COURSE_PLACEHOLDER = [
-    "Introduction to Programming",
-    "Linear Algebra",
-    "Analysis",
-    "Algorithms and Data Structures",
-]
-
 _db = SQLiteMemory()
 
 
@@ -455,7 +447,6 @@ def _background_scrape() -> None:
         last = _db.get_last_fetched()
         if last:
             try:
-                from datetime import timedelta
                 age = datetime.now() - datetime.fromisoformat(last)
                 if age > timedelta(hours=24):
                     _db.clear_deadlines()
@@ -495,9 +486,8 @@ if "startup_done" not in st.session_state:
     _should_fetch = True
     if _last:
         try:
-            from datetime import timedelta as _td
             _age = datetime.now() - datetime.fromisoformat(_last)
-            if _age < _td(hours=2):
+            if _age < timedelta(hours=2):
                 _should_fetch = False
                 print(f"[Startup] Cache is fresh ({int(_age.total_seconds()/60)}m old) — skipping scrape")
         except ValueError:
@@ -636,14 +626,27 @@ with st.sidebar:
     st.divider()
 
     st.markdown("**🔔 Upcoming (next 2 days)**")
-    _enrolled_for_filter = _db.get_profile("courses") or []
-    _imminent = _db.get_upcoming_deadlines_filtered(
-        days=2, enrolled_courses=_enrolled_for_filter
-    )
+    # Use current-semester enrolled only for sidebar (not historical courses)
+    _enrolled_current = _db.get_profile("enrolled") or _db.get_profile("courses") or []
+    _all_imminent = _db.get_upcoming_deadlines(days=2)
+
+    def _matches_enrolled(dl: dict, enrolled: list[str]) -> bool:
+        """Return True only if deadline is admin-level or matches an enrolled course."""
+        title = dl.get("title", "")
+        course_field = dl.get("course", "").lower()
+        # Always show TUM admin deadlines
+        if dl.get("course") == "TUM Administration":
+            return True
+        if not enrolled:
+            return True
+        enrolled_lower = [c.lower() for c in enrolled]
+        return any(e in title.lower() or e in course_field for e in enrolled_lower)
+
+    _imminent = [d for d in _all_imminent if _matches_enrolled(d, _enrolled_current)]
     if _imminent:
         for _dl in _imminent:
-            st.warning(f"**{_dl['title'][:40]}**  \n{_dl['deadline_date']}")
-    elif _enrolled_for_filter:
+            st.warning(f"**{_dl['title'][:45]}**  \n{_dl['deadline_date']}")
+    elif _enrolled_current:
         st.caption("No urgent deadlines for your courses in the next 2 days.")
     else:
         st.caption("No urgent deadlines cached right now.")
@@ -652,7 +655,7 @@ with st.sidebar:
 
     if st.session_state.watcher_status:
         st.markdown("**Per-source status**")
-        _icons = {"live": "🟢", "mock": "🟠", "skipped": "⚫", "not run": "⚪"}
+        _icons = {"live": "🟢", "mock": "🟠", "failed": "🔴", "skipped": "⚫", "not run": "⚪"}
         for src, state in st.session_state.watcher_status.items():
             st.caption(f"{_icons.get(state,'⚫')} {src.title()}: {state.title()}")
         st.divider()
@@ -676,122 +679,265 @@ tab_chat, tab_deadlines, tab_zhs, tab_about = st.tabs(
 # TAB 1 — Chat
 # ===========================================================================
 
+_AGENT_LABELS: dict[str, str] = {
+    "deadlines":        "📅 Watcher Agent",
+    "zhs_registration": "🏃 Executor Agent",
+    "elective_advice":  "📚 Advisor Agent",
+    "exam_plan":        "🧠 Learning Buddy",
+    "general":          "💬 General Assistant",
+    "error":            "⚠️ Error",
+    "":                 "",
+}
+
 with tab_chat:
-    # Header
     st.markdown(f"""
     <div style='display:flex;align-items:center;gap:12px;margin-bottom:4px'>
         <span style='font-size:2rem'>🎓</span>
         <div>
-            <h2 style='margin:0;color:{TUM_DARK_BLUE}'>TUM Easy</h2>
-            <p style='margin:0;color:#666;font-size:0.9rem'>Ask me about deadlines, electives, ZHS or exam prep</p>
+            <h2 style='margin:0;color:{TUM_DARK_BLUE}'>TUM Easy — Your Campus Co-Pilot</h2>
+            <p style='margin:0;color:#666;font-size:0.9rem'>Deadlines · Electives · Study Buddy · ZHS</p>
         </div>
     </div>
     """, unsafe_allow_html=True)
-
     st.divider()
 
-    # Quick prompts - click to switch between separate chat tabs
+    # ── Top nav: which agent area ──
     qcols = st.columns(4)
     quick_prompts = [
-        ("📅", "Deadlines this week", "deadlines"),
-        ("📚", "Recommend electives", "electives"),
-        ("🧠", "Learning Buddy", "learning_buddy"),
-        ("🏃", "Book ZHS", "zhs"),
+        ("📅", "Deadlines", "deadlines"),
+        ("📚", "Electives", "electives"),
+        ("🧠", "Study Buddy", "learning_buddy"),
+        ("🏃", "ZHS Sports", "zhs"),
     ]
     for col, (icon, label, chat_key) in zip(qcols, quick_prompts):
         with col:
-            st.markdown('<div class="quick-btn">', unsafe_allow_html=True)
-            if st.button(f"{icon} {label}", use_container_width=True):
+            is_active = st.session_state.get("active_chat", "deadlines") == chat_key
+            btn_style = f"background:{TUM_BLUE};color:white;border-radius:8px" if is_active else ""
+            st.markdown(f'<div style="{btn_style}">', unsafe_allow_html=True)
+            if st.button(f"{icon} {label}", use_container_width=True, key=f"nav_{chat_key}"):
                 st.session_state.active_chat = chat_key
+                st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
-
-    # Get the active chat (default to deadlines)
     active_chat = st.session_state.get("active_chat", "deadlines")
-    chat_messages = st.session_state[f"chat_{active_chat}"]
 
-    # Display messages for the active chat
-    for msg in chat_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    # ══════════════════════════════════════════════════════════
+    # STUDY BUDDY — per-course tabs with PDF upload + exam prep
+    # ══════════════════════════════════════════════════════════
+    if active_chat == "learning_buddy":
+        _lb_db = SQLiteMemory()
+        _lb_courses = _lb_db.get_profile("courses") or []
 
-    _AGENT_LABELS: dict[str, str] = {
-        "deadlines":       "📅 Watcher Agent",
-        "zhs_registration":"🏃 Executor Agent",
-        "elective_advice": "📚 Advisor Agent",
-        "exam_plan":       "🧠 Learning Buddy",
-        "general":         "💬 General Assistant",
-        "error":           "⚠️ Error",
-        "":                "",
-    }
-    if st.session_state.last_agent:
-        label = _AGENT_LABELS.get(st.session_state.last_agent, st.session_state.last_agent)
-        st.caption(f"Last activated: **{label}**")
+        if not _lb_courses:
+            st.info("No courses found in your profile yet. Sync TUMonline first via the sidebar.")
+        else:
+            def _short_label(name: str) -> str:
+                s = re.sub(r'\s*\(.*?\)', '', name).strip()
+                return s[:30] + "…" if len(s) > 30 else s
 
-    # --- Handle input for active chat ---
-    if active_chat == "deadlines":
-        typed = st.chat_input(f"How can I help you manage your deadlines?")
-    elif active_chat == "electives":
-        typed = st.chat_input(f"How can I help you choose your electives?")
-    elif active_chat == "learning_buddy":
-        typed = st.chat_input(f"How can I help you personalise a study plan")
-    elif active_chat == "zhs":
-        typed = st.chat_input(f"How can I help you search or book ZHS sport courses?")
-    if typed:
-        # Add user message to active chat
-        chat_messages.append({"role": "user", "content": typed})
-        with st.chat_message("user"):
-            st.markdown(typed)
+            # ── Course selector (selectbox — no cramped tabs) ──
+            selected_course_label = st.selectbox(
+                "📖 Select course",
+                options=_lb_courses,
+                format_func=_short_label,
+                key="lb_selected_course",
+                label_visibility="collapsed",
+            )
+            course_name = selected_course_label
+            tab_i = _lb_courses.index(course_name)
 
-        # Get response from orchestrator
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking…"):
-                response, agent_called = orchestrator_run(
-                    typed,
-                    thread_id=student_name or st.session_state.tum_username or "default",
+            st.markdown(f"### 📖 {course_name}")
+            st.divider()
+
+            chat_key_lb = f"chat_lb_{tab_i}"
+            quiz_mode_key = f"lb_quiz_mode_{tab_i}"
+            if chat_key_lb not in st.session_state:
+                st.session_state[chat_key_lb] = []
+
+            # ── Action buttons ──
+            act_col1, act_col2, act_col3 = st.columns(3)
+            with act_col1:
+                do_exam_plan = st.button("📝 Study Plan", key=f"examplan_{tab_i}", use_container_width=True)
+            with act_col2:
+                do_quiz = st.button("❓ Start Quiz", key=f"quiz_{tab_i}", use_container_width=True)
+            with act_col3:
+                do_clear = st.button("🗑 Clear Chat", key=f"clear_{tab_i}", use_container_width=True)
+
+            if do_clear:
+                st.session_state[chat_key_lb] = []
+                st.session_state.pop(quiz_mode_key, None)
+                st.rerun()
+
+            # ── PDF uploader ──
+            uploaded_file = st.file_uploader(
+                "📎 Upload lecture / past exam PDF",
+                type=["pdf"],
+                key=f"lb_upload_{tab_i}",
+                help="Upload slides or a past exam — I'll summarise or quiz you from it.",
+            )
+            pdf_text_key = f"lb_pdf_text_{tab_i}"
+            pdf_name_key = f"lb_pdf_name_{tab_i}"
+            last_up_key  = f"lb_last_up_{tab_i}"
+
+            if uploaded_file is not None:
+                if st.session_state.get(last_up_key) != uploaded_file.name:
+                    try:
+                        import fitz
+                        doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+                        extracted = "\n".join(p.get_text() for p in doc)
+                        doc.close()
+                    except Exception:
+                        uploaded_file.seek(0)
+                        extracted = uploaded_file.read().decode("utf-8", errors="ignore")
+                    st.session_state[pdf_text_key] = extracted
+                    st.session_state[pdf_name_key] = uploaded_file.name
+                    st.session_state[last_up_key]  = uploaded_file.name
+                chars = len(st.session_state.get(pdf_text_key, ""))
+                st.success(f"✅ **{uploaded_file.name}** loaded ({chars:,} chars) — ask me anything below.")
+            else:
+                for k in (pdf_text_key, pdf_name_key, last_up_key):
+                    st.session_state.pop(k, None)
+
+            pdf_text = st.session_state.get(pdf_text_key, "")
+            pdf_name = st.session_state.get(pdf_name_key, "")
+
+            # ── Quiz mode: inject system context ──
+            if do_quiz:
+                st.session_state[quiz_mode_key] = True
+                material_hint = f"\n\nMATERIAL:\n{pdf_text[:4000]}" if pdf_text else ""
+                quiz_system = (
+                    f"You are an interactive quiz master for the TUM course '{course_name}'."
+                    f"{material_hint}\n\n"
+                    "Rules: Ask ONE question at a time. After the student answers, give brief feedback "
+                    "(correct/incorrect + explanation), then ask the next question. "
+                    "Vary question types (conceptual, calculation, true/false). "
+                    "Start NOW with your first question."
                 )
-            st.markdown(response)
-            st.session_state.last_agent = agent_called
+                st.session_state[chat_key_lb].append({"role": "system_quiz", "content": quiz_system})
+                _q_init = f"[QUIZ START] {quiz_system}"
+                from tum_pulse.tools.bedrock_client import BedrockClient as _BC
+                _first_q = _BC().invoke(_q_init, max_tokens=300)
+                st.session_state[chat_key_lb].append({"role": "assistant", "content": _first_q})
+                st.rerun()
 
-            # Context-aware feedback badges shown after each relevant response
+            # ── Exam plan trigger ──
+            _quick_prompt = None
+            if do_exam_plan:
+                _quick_prompt = f"Prepare a 2-week study plan for {course_name}"
+
+            # ── Chat history ──
+            chat_msgs_lb = st.session_state[chat_key_lb]
+            is_quiz = st.session_state.get(quiz_mode_key, False)
+            if is_quiz:
+                st.info("🎯 **Quiz mode active** — answer freely, I'll give feedback and ask the next question.")
+
+            for msg in chat_msgs_lb:
+                if msg["role"] == "system_quiz":
+                    continue  # hidden context, don't display
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+            # ── Chat input ──
+            placeholder = (
+                "Type your answer…" if is_quiz
+                else f"Ask about {_short_label(course_name)}, summarise, explain…"
+            )
+            typed_lb = st.chat_input(placeholder, key=f"input_lb_{tab_i}")
+            user_msg = _quick_prompt or typed_lb
+
+            if user_msg:
+                chat_msgs_lb.append({"role": "user", "content": user_msg})
+                with st.chat_message("user"):
+                    st.markdown(user_msg)
+
+                with st.chat_message("assistant"):
+                    with st.spinner("🧠 Thinking…"):
+                        if is_quiz:
+                            # Pass full conversation to Bedrock so it can evaluate answer + ask next
+                            from tum_pulse.tools.bedrock_client import BedrockClient as _BC2
+                            _bc = _BC2()
+                            # Build prompt from visible history
+                            history_text = "\n".join(
+                                f"{'Student' if m['role']=='user' else 'Quiz Master'}: {m['content']}"
+                                for m in chat_msgs_lb
+                                if m["role"] in ("user", "assistant")
+                            )
+                            quiz_ctx = st.session_state[chat_key_lb][0]["content"] if chat_msgs_lb and chat_msgs_lb[0]["role"] == "system_quiz" else ""
+                            response = _bc.invoke(
+                                f"{quiz_ctx}\n\nCONVERSATION SO FAR:\n{history_text}\n\n"
+                                "Now give feedback on the last student answer and ask the next question.",
+                                max_tokens=400,
+                            )
+                        elif pdf_text:
+                            from tum_pulse.agents.learning_buddy_v2 import SmartLearningBuddy
+                            response = SmartLearningBuddy().run_with_pdf(user_msg, pdf_text, pdf_name)
+                        else:
+                            from tum_pulse.agents.learning_buddy_v2 import SmartLearningBuddy
+                            enriched = user_msg if course_name.lower() in user_msg.lower() \
+                                else f"{user_msg} (course: {course_name})"
+                            response = SmartLearningBuddy().run(enriched)
+                    st.markdown(response)
+                    st.session_state.last_agent = "exam_plan"
+
+                chat_msgs_lb.append({"role": "assistant", "content": response})
+                st.rerun()
+
+    # ══════════════════════════════════════════════════════════
+    # DEADLINES / ELECTIVES / ZHS — standard chat
+    # ══════════════════════════════════════════════════════════
+    else:
+        chat_messages = st.session_state[f"chat_{active_chat}"]
+
+        for msg in chat_messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        if st.session_state.last_agent:
+            label = _AGENT_LABELS.get(st.session_state.last_agent, st.session_state.last_agent)
+            st.caption(f"Last activated: **{label}**")
+
+        _placeholders = {
+            "deadlines": "Ask about your deadlines…",
+            "electives": "Ask for elective recommendations…",
+            "zhs":       "Search or book ZHS sport courses…",
+        }
+        typed = st.chat_input(_placeholders.get(active_chat, "How can I help?"))
+
+        if typed:
+            chat_messages.append({"role": "user", "content": typed})
+            with st.chat_message("user"):
+                st.markdown(typed)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking…"):
+                    response, agent_called = orchestrator_run(
+                        typed,
+                        thread_id=student_name or st.session_state.tum_username or "default",
+                    )
+                st.markdown(response)
+                st.session_state.last_agent = agent_called
+
+            # Context-aware feedback badges
             if agent_called in ("elective_advice", "exam_plan", "deadlines"):
                 _fb_db = SQLiteMemory()
                 _fb_grades = _fb_db.get_profile("grades") or {}
-                _weak = [
-                    c for c, g in _fb_grades.items()
-                    if isinstance(g, (int, float)) and g > 2.3
-                ]
+                _weak = [c for c, g in _fb_grades.items() if isinstance(g, (int, float)) and g > 2.3]
                 _urgent = _fb_db.get_upcoming_deadlines(days=3)
-
                 if agent_called in ("elective_advice", "exam_plan"):
                     if _weak:
-                        st.info(
-                            f"📉 Weak subjects considered: "
-                            f"{', '.join(_weak[:3])}"
-                        )
+                        st.info(f"📉 Weak subjects considered: {', '.join(_weak[:3])}")
                     if _urgent:
-                        st.warning(
-                            "⚠️ Upcoming deadlines detected — "
-                            "recommendations adapted for time pressure"
-                        )
-
+                        st.warning("⚠️ Upcoming deadlines detected — recommendations adapted for time pressure")
                 if agent_called == "elective_advice":
                     st.success("🎯 Personalised using your grades and course history")
                 elif agent_called == "exam_plan":
-                    st.success(
-                        "🧠 Study plan adapted to your weak subjects "
-                        "and available time"
-                    )
+                    st.success("🧠 Study plan adapted to your weak subjects and available time")
                 elif agent_called == "deadlines":
-                    st.success(
-                        "📅 Aggregated live from TUMonline, Moodle "
-                        "and Confluence"
-                    )
+                    st.success("📅 Aggregated live from TUMonline, Moodle and Confluence")
 
-        # Add assistant message to active chat
-        chat_messages.append({"role": "assistant", "content": response})
-        st.rerun()
+            chat_messages.append({"role": "assistant", "content": response})
+            st.rerun()
 
 # ===========================================================================
 # TAB 2 — Deadlines
@@ -805,8 +951,11 @@ with tab_deadlines:
         st.info("⏳ Syncing data from TUM systems in the background…")
     elif st.session_state.watcher_status:
         _BADGE = {
-            "live": "🟢 live", "mock": "🟠 demo",
-            "skipped": "⚫ skipped", "not run": "⚪ not run",
+            "live":    "🟢 live",
+            "mock":    "🟠 demo",
+            "failed":  "🔴 failed",
+            "skipped": "⚫ skipped",
+            "not run": "⚪ not run",
         }
         parts = [
             f"**{src.title()}** — {_BADGE.get(state, state)}"
@@ -823,19 +972,89 @@ with tab_deadlines:
     db = SQLiteMemory()
     deadlines = db.get_upcoming_deadlines(days=120)
 
+    is_mock_preview = False
     if not deadlines:
-        st.info("No cached deadlines yet. Use **🔄 Refresh** to try a live sync.")
-        st.warning("Showing demo preview data so the page is not empty.")
-        from tum_pulse.agents.watcher import _mock_tumonline, _mock_moodle
-        deadlines = _mock_tumonline() + _mock_moodle()
-        is_mock_preview = True
-    else:
-        is_mock_preview = False
+        st.info(
+            "No deadlines synced yet. Hit **🔄 Refresh** in the sidebar to pull live data "
+            "from TUMonline and Moodle."
+        )
+
+    # ── Calendar helpers ────────────────────────────────────────────────
+    def _gcal_url(title: str, date_str: str, details: str = "") -> str:
+        """Build a Google Calendar 'add event' URL for a single deadline."""
+        import urllib.parse
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d")
+            date_compact = d.strftime("%Y%m%d")
+            next_day = (d + timedelta(days=1)).strftime("%Y%m%d")
+        except ValueError:
+            return ""
+        params = {
+            "action": "TEMPLATE",
+            "text": title,
+            "dates": f"{date_compact}/{next_day}",
+            "details": details or f"TUM Easy deadline — {title}",
+        }
+        return "https://calendar.google.com/calendar/render?" + urllib.parse.urlencode(params)
+
+    def _build_ics(deadlines_list: list[dict]) -> bytes:
+        """Generate iCalendar (.ics) bytes for a list of deadline dicts."""
+        import uuid
+        lines = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//TUM Easy//TUM Deadlines//EN",
+            "CALSCALE:GREGORIAN",
+            "METHOD:PUBLISH",
+        ]
+        for dl in deadlines_list:
+            try:
+                d = datetime.strptime(dl["deadline_date"], "%Y-%m-%d")
+                date_compact = d.strftime("%Y%m%d")
+                next_day = (d + timedelta(days=1)).strftime("%Y%m%d")
+            except ValueError:
+                continue
+            uid = str(uuid.uuid4()) + "@tumeasy"
+            title = dl["title"].replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+            course = dl.get("course", "").replace(",", "\\,")
+            source = dl.get("source", "")
+            lines += [
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTART;VALUE=DATE:{date_compact}",
+                f"DTEND;VALUE=DATE:{next_day}",
+                f"SUMMARY:{title}",
+                f"DESCRIPTION:Course: {course}\\nSource: {source}",
+                "STATUS:CONFIRMED",
+                "BEGIN:VALARM",
+                "TRIGGER:-P1D",
+                "ACTION:DISPLAY",
+                f"DESCRIPTION:Reminder: {title}",
+                "END:VALARM",
+                "END:VEVENT",
+            ]
+        lines.append("END:VCALENDAR")
+        return "\r\n".join(lines).encode("utf-8")
+
+    # ── Export bar ──────────────────────────────────────────────────────
+    exp_col1, exp_col2 = st.columns([1, 3])
+    with exp_col1:
+        if deadlines and not is_mock_preview:
+            ics_bytes = _build_ics(deadlines)
+            st.download_button(
+                label="📥 Export All (.ics)",
+                data=ics_bytes,
+                file_name="tum_deadlines.ics",
+                mime="text/calendar",
+                use_container_width=True,
+                help="Import into Apple Calendar, Google Calendar, Outlook, etc.",
+            )
 
     _SOURCE_ICON = {
         "tumonline":  "🏛️ TUMonline",
         "moodle":     "📘 Moodle",
         "confluence": "📝 Wiki",
+        "mock":       "🔶 Demo",
     }
 
     rows = []
@@ -873,9 +1092,7 @@ with tab_deadlines:
                 "Source": st.column_config.TextColumn("Source",  width="small"),
             },
         )
-        caption = f"{len(deadlines)} deadline(s)"
-        caption += " (preview — hit Refresh for real data)" if is_mock_preview else " from your TUM account ✅"
-        st.caption(caption)
+        st.caption(f"{len(deadlines)} real deadline(s) from your TUM account ✅")
 
     this_week = db.get_upcoming_deadlines(days=7) if not is_mock_preview else []
     if this_week:
@@ -886,12 +1103,32 @@ with tab_deadlines:
             except (ValueError, TypeError):
                 days_left = 999
             icon = "🔴" if days_left <= 1 else "🟠" if days_left <= 3 else "🟡"
-            st.markdown(
-                f"<div class='tum-card{' tum-card-orange' if days_left <= 1 else ''}'>"
-                f"{icon} <b>{dl['deadline_date']}</b> &nbsp;—&nbsp; {dl['title']}<br>"
-                f"<span style='color:#888;font-size:0.85rem'>{dl.get('course','')}</span></div>",
-                unsafe_allow_html=True,
+            gcal = _gcal_url(
+                dl["title"],
+                dl["deadline_date"],
+                f"Course: {dl.get('course', '')} | Source: {dl.get('source', '')}",
             )
+            ics_single = _build_ics([dl])
+            card_col, btn_col1, btn_col2 = st.columns([5, 1, 1])
+            with card_col:
+                st.markdown(
+                    f"<div class='tum-card{' tum-card-orange' if days_left <= 1 else ''}'>"
+                    f"{icon} <b>{dl['deadline_date']}</b> &nbsp;—&nbsp; {dl['title']}<br>"
+                    f"<span style='color:#888;font-size:0.85rem'>{dl.get('course','')}</span></div>",
+                    unsafe_allow_html=True,
+                )
+            with btn_col1:
+                if gcal:
+                    st.link_button("📅 Google Cal", gcal, use_container_width=True)
+            with btn_col2:
+                st.download_button(
+                    "📥 .ics",
+                    data=ics_single,
+                    file_name=f"deadline_{dl['deadline_date']}.ics",
+                    mime="text/calendar",
+                    use_container_width=True,
+                    key=f"ics_{dl.get('id', dl['title'][:20])}",
+                )
 
 # ===========================================================================
 # TAB 3 — ZHS Sports
