@@ -14,7 +14,7 @@ Search flow:
 
 Registration flow:
   - Navigate to /de/kurse/{slug}
-  - Click "Buchen" / "Zum Warenkorb" button
+  - Click "Register" / "Zum Warenkorb" button
   - Confirm on modal if present
 """
 
@@ -201,8 +201,8 @@ class ZHSConnector:
 
             # Look for registration/booking button
             btn = page.locator(
-                'button:has-text("Buchen"), button:has-text("Anmelden"), '
-                'button:has-text("Registrieren"), a:has-text("Buchen"), '
+                'button:has-text("Register"), button:has-text("Anmelden"), '
+                'button:has-text("Registrieren"), a:has-text("Register"), '
                 '[class*="book"], [class*="register"]'
             ).first
 

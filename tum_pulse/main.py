@@ -981,7 +981,7 @@ with tab_zhs:
                     </div>
                     """, unsafe_allow_html=True)
 
-                    if st.button("📌 Buchen", key=f"book_{i}", use_container_width=False):
+                    if st.button("📌 Register", key=f"book_{i}", use_container_width=False):
                         from tum_pulse.connectors.zhs import ZHSConnector
                         from tum_pulse.config import ZHS_USERNAME, ZHS_PASSWORD
                         from playwright.sync_api import sync_playwright
@@ -1012,7 +1012,7 @@ with tab_zhs:
         <b style='color:{TUM_DARK_BLUE}'>How it works</b><br><br>
         1. TUM Easy logs into <code>kurse.zhs-muenchen.de</code> with your TUM SSO credentials<br>
         2. Searches available sport courses matching your query<br>
-        3. Click <b>Buchen</b> to register — confirmation sent to your TUM email
+        3. Click <b>Register</b> to register — confirmation sent to your TUM email
     </div>
     """, unsafe_allow_html=True)
 

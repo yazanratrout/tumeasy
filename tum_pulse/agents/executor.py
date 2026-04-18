@@ -88,7 +88,7 @@ class ExecutorAgent:
         """Parse natural-language task and dispatch to the right method."""
         task_lower = task.lower()
 
-        if any(kw in task_lower for kw in ("zhs", "sport", "register", "buchen", "course", "gym", "swim")):
+        if any(kw in task_lower for kw in ("zhs", "sport", "register", "register", "course", "gym", "swim")):
             # Extract sport name after "for" keyword or use full task
             sport = "sport"
             date = ""
