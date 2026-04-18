@@ -1,5 +1,6 @@
 """TUMonline connector — Keycloak → Shibboleth login + deadline scraping."""
 
+import json
 import re
 from datetime import datetime
 from typing import Optional
@@ -111,92 +112,82 @@ class TUMonlineConnector:
                 browser.close()
 
     def get_enrolled_courses(self, page) -> dict:
-        """Scrape the student's courses and grades from TUMonline after login.
+        """Fetch enrolled courses via CAMPUSonline REST API.
 
-        Navigates to the student's course/grade pages and extracts currently
-        enrolled courses and completed courses with grades.
+        Navigates to the new SPA, forces a Bearer token refresh, then calls
+        /slc.tm.cp/student/myCourses for the current semester.
 
         Returns:
             dict with keys:
               "enrolled": list of str (current semester course names)
-              "grades": dict of {course_name: grade_float} (completed courses)
-              "all_courses": list of str (union of enrolled + completed course names)
+              "grades": dict  (empty — grades in student dossier require separate flow)
+              "all_courses": list of str (same as enrolled)
         """
         result: dict = {"enrolled": [], "grades": {}, "all_courses": []}
 
-        # --- Current semester courses ---
-        for path in [
-            "/wbStELP.cbSEL",
-            "/wbKUVKU.cbSEL",
-            "/wbStELPV.cbSEL",
-        ]:
-            try:
-                page.goto(self.BASE + path, timeout=15_000)
-                page.wait_for_load_state("networkidle", timeout=10_000)
+        try:
+            # Navigate to SPA to establish auth context
+            page.goto(
+                "https://campus.tum.de/tumonline/ee/ui/ca2/app/desktop/#/home?$ctx=lang=en",
+                timeout=20_000,
+            )
+            page.wait_for_load_state("networkidle", timeout=15_000)
+            page.wait_for_timeout(1000)
 
-                rows = page.locator("table tr, .listresult tr, .list tr").all()
-                for row in rows:
-                    text = row.inner_text().strip()
-                    if not text or len(text) < 5:
-                        continue
-                    if any(t in text for t in ["VO", "UE", "SE", "PR", "MA", "IN", "EI"]):
-                        cells = row.locator("td").all()
-                        if len(cells) >= 2:
-                            course_name = cells[1].inner_text().strip()
-                            if course_name and len(course_name) > 3:
-                                result["enrolled"].append(course_name)
+            # Force a token refresh via the SPA's own endpoint
+            token_data = page.evaluate("""async () => {
+                const r = await fetch('/tumonline/ee/rest/auth/token/refresh', {
+                    method: 'POST',
+                    headers: {Accept: 'application/json', 'Content-Type': 'application/json'},
+                    body: '{}'
+                });
+                return r.ok ? await r.json() : {};
+            }""")
+            token = token_data.get("accessToken", "")
+            if not token:
+                print("[TUMonlineConnector] Token refresh returned no accessToken")
+                return result
 
-                if result["enrolled"]:
-                    print(f"[TUMonlineConnector] Found {len(result['enrolled'])} enrolled courses")
+            token_js = json.dumps(token)  # safely quoted for JS string interpolation
+
+            # Step 1: discover current semester ID
+            meta = page.evaluate(f"""async () => {{
+                const r = await fetch('/tumonline/ee/rest/slc.tm.cp/student/courses?$ctx=lang=EN', {{
+                    headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}
+                }});
+                return r.ok ? await r.json() : {{}};
+            }}""")
+
+            semester_id: Optional[int] = None
+            for link in meta.get("links", []):
+                m = re.search(r'semesterId=(\d+)', link.get("href", ""))
+                if m:
+                    semester_id = int(m.group(1))
                     break
-            except Exception as exc:
-                print(f"[TUMonlineConnector] Could not fetch courses from {path}: {exc}")
-                continue
 
-        # --- Grades / transcript ---
-        for path in [
-            "/wbStuPla.cbStuProgress",
-            "/wbStuPla.cbPruefungen",
-            "/wbStELPV.cbSELPruefungen",
-        ]:
-            try:
-                page.goto(self.BASE + path, timeout=15_000)
-                page.wait_for_load_state("networkidle", timeout=10_000)
+            if not semester_id:
+                print("[TUMonlineConnector] Could not determine semester ID from courses endpoint")
+                return result
 
-                rows = page.locator("table tr, .listresult tr").all()
-                for row in rows:
-                    cells = row.locator("td").all()
-                    if len(cells) < 3:
-                        continue
-                    texts = [c.inner_text().strip() for c in cells]
+            # Step 2: fetch enrolled courses for this semester
+            data = page.evaluate(f"""async () => {{
+                const r = await fetch(
+                    '/tumonline/ee/rest/slc.tm.cp/student/myCourses?$filter=termId-eq={semester_id}&$orderBy=title=ascnf&$skip=0&$top=50',
+                    {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}}}
+                );
+                return r.ok ? await r.json() : {{}};
+            }}""")
 
-                    course_name = ""
-                    grade = None
-                    for t in texts:
-                        if len(t) > 5 and not t.replace(".", "").replace(",", "").isdigit():
-                            course_name = t
-                        try:
-                            val = float(t.replace(",", "."))
-                            if 1.0 <= val <= 5.0:
-                                grade = val
-                        except ValueError:
-                            pass
+            for reg in data.get("registrations", []):
+                title = reg.get("course", {}).get("courseTitle", {}).get("value", "")
+                if title:
+                    result["enrolled"].append(title)
 
-                    if course_name and grade is not None:
-                        result["grades"][course_name] = grade
+            result["all_courses"] = list(result["enrolled"])
+            print(f"[TUMonlineConnector] Found {len(result['enrolled'])} enrolled courses via REST API")
 
-                if result["grades"]:
-                    print(f"[TUMonlineConnector] Found {len(result['grades'])} graded courses")
-                    break
-            except Exception as exc:
-                print(f"[TUMonlineConnector] Could not fetch grades from {path}: {exc}")
-                continue
-
-        all_names = list(result["enrolled"])
-        for name in result["grades"]:
-            if name not in all_names:
-                all_names.append(name)
-        result["all_courses"] = all_names
+        except Exception as exc:
+            print(f"[TUMonlineConnector] get_enrolled_courses error: {exc}")
 
         return result
 
