@@ -1,30 +1,26 @@
 """LearningBuddyAgent: exam planner using past papers + lecture content."""
 
 import json
-import os
+import re
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import requests
 
 from tum_pulse.config import DATA_DIR, MOODLE_BASE_URL, TUM_PASSWORD, TUM_USERNAME
+from tum_pulse.connectors.moodle import MoodleConnector
 from tum_pulse.memory.database import SQLiteMemory
 from tum_pulse.tools.bedrock_client import BedrockClient
-from tum_pulse.tools.moodle_scraper import MoodleScraper
+from tum_pulse.tools.moodle_scraper import MoodleScraper as _MoodleScraper
 
 
 class LearningBuddyAgent:
     """Builds personalised study plans by analysing past exam papers and lectures."""
 
     def __init__(self) -> None:
-        """Initialise dependencies: Bedrock client, Moodle scraper, SQLite memory."""
+        """Initialise dependencies: Bedrock client, MoodleConnector, SQLite memory."""
         self.bedrock = BedrockClient()
-        self.scraper = MoodleScraper(
-            base_url=MOODLE_BASE_URL,
-            username=TUM_USERNAME,
-            password=TUM_PASSWORD,
-        )
+        self.scraper = MoodleConnector()
         self.db = SQLiteMemory()
         Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -32,43 +28,214 @@ class LearningBuddyAgent:
     # PDF acquisition
     # ------------------------------------------------------------------
 
-    def download_moodle_pdfs(self, course_name: str) -> list[str]:
-        """Download PDFs for *course_name* from Moodle.
+    def _find_moodle_course_id(self, course_name: str, page, session: requests.Session) -> str | None:
+        """Search Moodle for a course matching course_name and return its ID.
+
+        Tries:
+        1. My courses dashboard: /my/ — scrape enrolled course links
+        2. Moodle search: /course/search.php?search={course_name}
 
         Args:
-            course_name: Human-readable course name used to match Moodle files.
+            course_name: Human-readable course name to search for.
+            page: Active Playwright page (authenticated).
+            session: Authenticated requests.Session with Moodle cookies.
 
         Returns:
-            List of local file paths to downloaded PDFs.
-
-        TODO: Real Moodle scraping requires:
-              1. Call self.scraper.login() with valid TUM SSO credentials
-              2. Look up the numeric Moodle course ID from a course catalogue call
-              3. Call self.scraper.get_course_files(course_id) to get file list
-              4. Filter for PDFs and call self.scraper.download_pdf() for each
-              5. Return local paths
+            Course ID string or None.
         """
-        files = self.scraper.get_sample_data()
-        course_lower = course_name.lower().replace(" ", "_")
-        local_paths: list[str] = []
+        from bs4 import BeautifulSoup
 
+        course_name_lower = course_name.lower()
+
+        # Strategy 1: scrape /my/ dashboard for enrolled course links
+        try:
+            resp = session.get(
+                f"{MOODLE_BASE_URL}/my/",
+                timeout=15,
+                allow_redirects=True,
+            )
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            for link in soup.find_all("a", href=True):
+                href = link.get("href", "")
+                text = link.get_text(strip=True).lower()
+                m = re.search(r"course/view\.php\?id=(\d+)", href)
+                if m and any(
+                    word in text
+                    for word in course_name_lower.split()
+                    if len(word) > 3
+                ):
+                    course_id = m.group(1)
+                    print(f"[LearningBuddy] Found course ID {course_id} for '{course_name}'")
+                    return course_id
+        except Exception as exc:
+            print(f"[LearningBuddy] Dashboard scrape failed: {exc}")
+
+        # Strategy 2: Moodle course search
+        try:
+            search_term = course_name.replace(" ", "+")
+            resp = session.get(
+                f"{MOODLE_BASE_URL}/course/search.php?search={search_term}",
+                timeout=15,
+            )
+            soup = BeautifulSoup(resp.text, "lxml")
+            for link in soup.find_all("a", href=True):
+                href = link.get("href", "")
+                text = link.get_text(strip=True).lower()
+                m = re.search(r"course/view\.php\?id=(\d+)", href)
+                if m and any(
+                    word in text
+                    for word in course_name_lower.split()
+                    if len(word) > 3
+                ):
+                    course_id = m.group(1)
+                    print(f"[LearningBuddy] Found course ID {course_id} via search")
+                    return course_id
+        except Exception as exc:
+            print(f"[LearningBuddy] Course search failed: {exc}")
+
+        print(f"[LearningBuddy] Could not find Moodle course ID for '{course_name}'")
+        return None
+
+    def download_moodle_pdfs(self, course_name: str) -> list[str]:
+        """Download real PDFs for course_name from Moodle via SSO login.
+
+        Flow:
+        1. Login to Moodle via MoodleConnector (Playwright SSO)
+        2. Transfer cookies to requests.Session
+        3. Find course ID from dashboard or search
+        4. Scrape course page for PDF links (pluginfile.php)
+        5. Download each PDF to DATA_DIR
+        6. Falls back to placeholder text files if any step fails
+
+        Args:
+            course_name: Human-readable course name (e.g. "Analysis 2").
+
+        Returns:
+            List of local file paths to downloaded files.
+        """
+        from playwright.sync_api import sync_playwright
+        from bs4 import BeautifulSoup
+
+        print(f"[LearningBuddy] Attempting real Moodle download for '{course_name}'...")
+        Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                page = browser.new_page()
+
+                try:
+                    # Step 1: Login via MoodleConnector SSO
+                    if not self.scraper.login(page, TUM_USERNAME, TUM_PASSWORD):
+                        raise ValueError("Moodle SSO login failed")
+                    print("[LearningBuddy] Moodle login successful")
+
+                    # Step 2: Transfer cookies to requests.Session
+                    session = requests.Session()
+                    session.headers.update({"User-Agent": "TUMPulse/1.0"})
+                    for cookie in page.context.cookies():
+                        if "moodle" in cookie.get("domain", "").lower():
+                            session.cookies.set(
+                                cookie["name"],
+                                cookie["value"],
+                                domain=cookie.get("domain", ""),
+                            )
+
+                    # Step 3: Find course ID
+                    course_id = self._find_moodle_course_id(course_name, page, session)
+
+                    local_paths: list[str] = []
+
+                    if course_id:
+                        # Step 4: Scrape course page for file links
+                        course_url = f"{MOODLE_BASE_URL}/course/view.php?id={course_id}"
+                        print(f"[LearningBuddy] Scraping course page: {course_url}")
+
+                        resp = session.get(course_url, timeout=15)
+                        soup = BeautifulSoup(resp.text, "lxml")
+
+                        pdf_links: list[dict] = []
+                        seen_urls: set[str] = set()
+                        for link in soup.find_all("a", href=True):
+                            href = link.get("href", "")
+                            text = link.get_text(strip=True)
+                            if "pluginfile.php" in href and href not in seen_urls:
+                                ext = Path(href.split("?")[0]).suffix.lower()
+                                if ext in (".pdf", ".pptx", ".ppt", ""):
+                                    pdf_links.append({"url": href, "name": text or Path(href).name})
+                                    seen_urls.add(href)
+
+                        print(f"[LearningBuddy] Found {len(pdf_links)} files on course page")
+
+                        def _classify(name: str) -> int:
+                            n = name.lower()
+                            if any(w in n for w in ["exam", "klausur", "past", "previous", "pruef"]):
+                                return 0
+                            if any(w in n for w in ["exercise", "uebung", "sheet", "aufgabe", "tutorial"]):
+                                return 1
+                            return 2
+
+                        pdf_links.sort(key=lambda x: _classify(x["name"]))
+
+                        # Step 5: Download up to 10 files
+                        for file_info in pdf_links[:10]:
+                            url = file_info["url"]
+                            safe_name = re.sub(r"[^\w\-_.]", "_", file_info["name"])[:80]
+                            if not safe_name.endswith(".pdf"):
+                                safe_name += ".pdf"
+                            save_path = str(Path(DATA_DIR) / safe_name)
+
+                            try:
+                                dl = session.get(url, timeout=30, stream=True)
+                                dl.raise_for_status()
+                                with open(save_path, "wb") as fh:
+                                    for chunk in dl.iter_content(chunk_size=8192):
+                                        fh.write(chunk)
+                                local_paths.append(save_path)
+                                print(f"[LearningBuddy] Downloaded: {safe_name}")
+                            except Exception as exc:
+                                print(f"[LearningBuddy] Failed to download {url}: {exc}")
+
+                    if local_paths:
+                        print(f"[LearningBuddy] Successfully downloaded {len(local_paths)} files")
+                        return local_paths
+
+                    print("[LearningBuddy] No files downloaded — using placeholder fallback")
+                    return self._placeholder_files(course_name)
+
+                finally:
+                    browser.close()
+
+        except Exception as exc:
+            print(f"[LearningBuddy] Real Moodle download failed: {exc}")
+            return self._placeholder_files(course_name)
+
+    def _placeholder_files(self, course_name: str) -> list[str]:
+        """Create placeholder text files for demo when real Moodle is unavailable.
+
+        Args:
+            course_name: Name of the course for context in the placeholder content.
+
+        Returns:
+            List of local placeholder file paths.
+        """
+        files = _MoodleScraper().get_sample_data()
+        local_paths: list[str] = []
         for file_meta in files:
             filename = file_meta["name"]
             save_path = str(Path(DATA_DIR) / filename)
-
-            # For demo: create a placeholder text file since real Moodle auth is absent
             if not Path(save_path).exists():
                 with open(save_path, "w") as fh:
                     fh.write(
                         f"[SAMPLE CONTENT for {filename}]\n"
-                        "This is placeholder text generated for demo purposes.\n"
                         f"Course: {course_name}\n"
                         "Topics: integration, differentiation, series, limits, continuity.\n"
                         "Past exam focus: Taylor series, Fourier series, multivariable calculus.\n"
-                        "Typical point distribution: 30% integration, 25% series, 20% differential equations, 25% theory.\n"
+                        "Typical point distribution: 30% integration, 25% series, "
+                        "20% differential equations, 25% theory.\n"
                     )
             local_paths.append(save_path)
-
         return local_paths
 
     # ------------------------------------------------------------------
@@ -265,4 +432,10 @@ Format as clean markdown with ## Week headers."""
 
 if __name__ == "__main__":
     agent = LearningBuddyAgent()
-    print(agent.run("Help me pass Analysis 2"))
+    print("Testing real Moodle PDF download...")
+    paths = agent.download_moodle_pdfs("Machine Learning")
+    print(f"Got {len(paths)} files:")
+    for p in paths:
+        print(f"  {p}")
+    print("\nGenerating study plan...")
+    print(agent.run("Help me pass Machine Learning"))
