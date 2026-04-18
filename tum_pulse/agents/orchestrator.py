@@ -17,7 +17,8 @@ from tum_pulse.agents.executor import ExecutorAgent
 from tum_pulse.agents.learning_buddy_v2 import SmartLearningBuddy
 from tum_pulse.agents.watcher import WatcherAgent
 from tum_pulse.memory.database import SQLiteMemory
-from tum_pulse.tools.bedrock_client import BedrockClient
+from tum_pulse.tools.bedrock_client import BedrockClient, HAIKU
+from tum_pulse.tools.llm_cache import LLMCache
 
 
 # ---------------------------------------------------------------------------
@@ -249,11 +250,9 @@ def learning_buddy_node(state: OrchestratorState) -> OrchestratorState:
 
 
 def general_node(state: OrchestratorState) -> OrchestratorState:
-    """Handle general questions directly via Claude.
-    
-    Passes context for personalized responses about courses and deadlines.
-    """
+    """Handle general questions via Haiku (fast, cached 1h)."""
     bedrock = BedrockClient()
+    llm_cache = LLMCache()
     system = (
         "You are TUM Pulse, a helpful AI assistant for TU Munich students. "
         "You help with deadlines, course recommendations, ZHS sport registration, and exam planning. "
@@ -265,12 +264,17 @@ def general_node(state: OrchestratorState) -> OrchestratorState:
         context_str += f"\nStudent's courses: {context['courses']}"
     if context.get("weak_subjects"):
         context_str += f"\nWeak subjects to strengthen: {context['weak_subjects']}"
-    
+
     user_msg = state["user_input"]
     if context_str:
         user_msg = f"{user_msg}{context_str}"
-    
-    response = bedrock.invoke(user_msg, system=system)
+
+    cached = llm_cache.get(user_msg, model=HAIKU)
+    if cached:
+        return {**state, "response": cached}
+
+    response = bedrock.invoke(user_msg, system=system, model=HAIKU)
+    llm_cache.set(user_msg, response, ttl_seconds=3600, model=HAIKU)
     return {**state, "response": response}
 
 

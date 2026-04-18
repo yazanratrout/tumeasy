@@ -267,7 +267,7 @@ for _k, _v in {
     "chat_electives": [],
     "chat_learning_buddy": [],
     "chat_zhs": [],
-    "active_chat": "deadlines",
+    "active_chat": "electives",
 }.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -630,17 +630,38 @@ with st.sidebar:
     _enrolled_current = _db.get_profile("enrolled") or _db.get_profile("courses") or []
     _all_imminent = _db.get_upcoming_deadlines(days=2)
 
+    _SB_STOPWORDS = frozenset({
+        "which","their","these","those","about","other","where","there",
+        "using","seminar","systems","master","introduction",
+    })
+
+    def _sb_key_words(name: str) -> list[str]:
+        import re as _re2
+        clean = _re2.sub(r'\([A-Z]{1,4}\d{3,}[^)]*\)', '', name).lower()
+        return [w for w in _re2.split(r'\W+', clean) if len(w) > 3 and w not in _SB_STOPWORDS]
+
     def _matches_enrolled(dl: dict, enrolled: list[str]) -> bool:
-        """Return True only if deadline is admin-level or matches an enrolled course."""
-        title = dl.get("title", "")
-        course_field = dl.get("course", "").lower()
-        # Always show TUM admin deadlines
+        import re as _re2
         if dl.get("course") == "TUM Administration":
+            return True
+        title = dl.get("title", "")
+        if title.startswith(("Exam Registration Deadline", "Course Registration",
+                              "Re-enrollment", "Semester Contribution", "Exmatriculation")):
             return True
         if not enrolled:
             return True
-        enrolled_lower = [c.lower() for c in enrolled]
-        return any(e in title.lower() or e in course_field for e in enrolled_lower)
+        text = (title + " " + (dl.get("course") or "")).lower()
+        for enr in enrolled:
+            codes = _re2.findall(r'[A-Z]{1,4}\d{3,}', enr)
+            if any(c.lower() in text for c in codes):
+                return True
+            words = _sb_key_words(enr)
+            if not words:
+                continue
+            hits = sum(1 for w in words if w in text)
+            if hits >= (1 if len(words) == 1 else 2):
+                return True
+        return False
 
     _imminent = [d for d in _all_imminent if _matches_enrolled(d, _enrolled_current)]
     if _imminent:
@@ -702,16 +723,14 @@ with tab_chat:
     st.divider()
 
     # ── Top nav: which agent area ──
-    qcols = st.columns(4)
+    qcols = st.columns(2)
     quick_prompts = [
-        ("📅", "Deadlines", "deadlines"),
         ("📚", "Electives", "electives"),
         ("🧠", "Study Buddy", "learning_buddy"),
-        ("🏃", "ZHS Sports", "zhs"),
     ]
     for col, (icon, label, chat_key) in zip(qcols, quick_prompts):
         with col:
-            is_active = st.session_state.get("active_chat", "deadlines") == chat_key
+            is_active = st.session_state.get("active_chat", "electives") == chat_key
             btn_style = f"background:{TUM_BLUE};color:white;border-radius:8px" if is_active else ""
             st.markdown(f'<div style="{btn_style}">', unsafe_allow_html=True)
             if st.button(f"{icon} {label}", use_container_width=True, key=f"nav_{chat_key}"):
@@ -720,7 +739,7 @@ with tab_chat:
             st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
-    active_chat = st.session_state.get("active_chat", "deadlines")
+    active_chat = st.session_state.get("active_chat", "electives")
 
     # ══════════════════════════════════════════════════════════
     # STUDY BUDDY — per-course tabs with PDF upload + exam prep
@@ -970,7 +989,44 @@ with tab_deadlines:
     st.divider()
 
     db = SQLiteMemory()
-    deadlines = db.get_upcoming_deadlines(days=120)
+    _tab_enrolled = db.get_profile("enrolled") or db.get_profile("courses") or []
+
+    _DL_STOPWORDS = frozenset({
+        "which","their","these","those","about","other","where","there",
+        "using","seminar","systems","master","introduction",
+    })
+
+    def _dl_key_words(name: str) -> list[str]:
+        import re as _re
+        clean = _re.sub(r'\([A-Z]{1,4}\d{3,}[^)]*\)', '', name).lower()
+        return [w for w in _re.split(r'\W+', clean) if len(w) > 3 and w not in _DL_STOPWORDS]
+
+    def _deadline_matches_enrolled(dl: dict) -> bool:
+        import re as _re
+        if dl.get("course") == "TUM Administration":
+            return True
+        title = dl.get("title", "").strip()
+        if title.startswith(("Exam Registration Deadline", "Course Registration",
+                              "Re-enrollment", "Semester Contribution", "Exmatriculation")):
+            return True
+        if not _tab_enrolled:
+            return True  # no enrollment data yet — show everything
+        text = (title + " " + (dl.get("course") or "")).lower()
+        for enr in _tab_enrolled:
+            codes = _re.findall(r'[A-Z]{1,4}\d{3,}', enr)
+            if any(c.lower() in text for c in codes):
+                return True
+            words = _dl_key_words(enr)
+            if not words:
+                continue
+            hits = sum(1 for w in words if w in text)
+            threshold = 1 if len(words) == 1 else 2
+            if hits >= threshold:
+                return True
+        return False
+
+    _all_deadlines = db.get_upcoming_deadlines(days=120)
+    deadlines = [d for d in _all_deadlines if _deadline_matches_enrolled(d)]
 
     is_mock_preview = False
     if not deadlines:
@@ -1094,7 +1150,7 @@ with tab_deadlines:
         )
         st.caption(f"{len(deadlines)} real deadline(s) from your TUM account ✅")
 
-    this_week = db.get_upcoming_deadlines(days=7) if not is_mock_preview else []
+    this_week = [d for d in db.get_upcoming_deadlines(days=7) if _deadline_matches_enrolled(d)] if not is_mock_preview else []
     if this_week:
         st.markdown(f"<h3 style='color:{TUM_DARK_BLUE};margin-top:24px'>This Week</h3>", unsafe_allow_html=True)
         for dl in this_week:

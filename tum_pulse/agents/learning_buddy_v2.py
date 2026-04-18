@@ -8,7 +8,8 @@ from pathlib import Path
 from tum_pulse.config import DATA_DIR
 from tum_pulse.connectors.cache import CacheManager
 from tum_pulse.memory.database import SQLiteMemory
-from tum_pulse.tools.bedrock_client import BedrockClient
+from tum_pulse.tools.bedrock_client import BedrockClient, HAIKU, SONNET
+from tum_pulse.tools.llm_cache import LLMCache
 from tum_pulse.tools.moodle_scraper import MoodleScraper
 
 
@@ -39,6 +40,7 @@ class SmartLearningBuddy:
         self.cache = CacheManager()
         self.db = SQLiteMemory()
         self.bedrock = BedrockClient()
+        self.llm_cache = LLMCache()
         self.scraper = MoodleScraper()
         Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -113,7 +115,7 @@ class SmartLearningBuddy:
                     f'Courses:\n' + "\n".join(f"- {n}" for n in all_courses)
                     + "\n\nWhich course is the user asking about? Return ONLY the exact course name or NONE.\nCourse:"
                 )
-                result = self.bedrock.invoke(prompt, max_tokens=40).strip().strip('"').strip("'")
+                result = self.bedrock.invoke(prompt, max_tokens=40, model=HAIKU).strip().strip('"').strip("'")
                 if result and result != "NONE":
                     for cid, info in (current_courses or {}).items():
                         if result.lower() in info["name"].lower() or info["name"].lower() in result.lower():
@@ -256,7 +258,7 @@ class SmartLearningBuddy:
     # ─────────────────────────────────────────────────────────────────────
 
     def _analyse_topics(self, course_name: str, doc_pairs: list[tuple[str, str]], context: dict) -> dict:
-        """Use Claude to identify key topics and their exam weight."""
+        """Use Haiku to extract key topics and their exam weight — cached 12h."""
         combined = "\n\n".join(
             f"=== {name} ===\n{text[:4000]}" for name, text in doc_pairs
         )
@@ -286,13 +288,23 @@ Identify ALL distinct exam topics. Return JSON only:
 
 Order by priority_score descending. Return ONLY valid JSON."""
 
-        raw = self.bedrock.invoke(prompt, max_tokens=1500)
+        cached = self.llm_cache.get(prompt, model=HAIKU)
+        if cached:
+            print(f"[SmartLearningBuddy] Topic analysis cache hit for {course_name}")
+            try:
+                return json.loads(cached)
+            except Exception:
+                pass
+
+        raw = self.bedrock.invoke(prompt, max_tokens=1500, model=HAIKU)
         try:
             if "```json" in raw:
                 raw = raw.split("```json")[1].split("```")[0]
             elif "```" in raw:
                 raw = raw.split("```")[1].split("```")[0]
-            return json.loads(raw.strip())
+            result = json.loads(raw.strip())
+            self.llm_cache.set(prompt, json.dumps(result), ttl_seconds=43200, model=HAIKU)
+            return result
         except Exception:
             return {"topics": []}
 
@@ -429,7 +441,10 @@ Use markdown formatting. Be specific to the actual content above."""
                     "Based on typical TUM exam patterns for this course, include key topics, "
                     "week-by-week breakdown, and exam tips. Use markdown."
                 )
-                plan = self.bedrock.invoke(prompt, max_tokens=2000)
+                cached = self.llm_cache.get(prompt, model=SONNET)
+                plan = cached or self.bedrock.invoke(prompt, max_tokens=2000, model=SONNET)
+                if not cached:
+                    self.llm_cache.set(prompt, plan, ttl_seconds=21600, model=SONNET)
                 return (
                     f"## Study Plan: {course['name']}\n\n"
                     "> ⚠️ No course materials were accessible — plan generated from course knowledge.\n\n"

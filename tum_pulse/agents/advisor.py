@@ -7,10 +7,82 @@ from collections import Counter
 import requests
 
 from tum_pulse.memory.database import SQLiteMemory
-from tum_pulse.tools.bedrock_client import BedrockClient
+from tum_pulse.tools.bedrock_client import BedrockClient, HAIKU
 from tum_pulse.tools.embeddings import EmbeddingsClient
+from tum_pulse.tools.llm_cache import LLMCache
 
 TUM_API_BASE = "https://api.srv.nat.tum.de"
+
+# ---------------------------------------------------------------------------
+# Career paths + Munich companies by direction
+# ---------------------------------------------------------------------------
+
+CAREER_PATHS: dict[str, dict] = {
+    "ml": {
+        "roles": ["ML Engineer", "Data Scientist", "AI Research Scientist", "NLP Engineer",
+                  "Computer Vision Engineer", "MLOps Engineer"],
+        "companies": [
+            ("Aleph Alpha", "https://aleph-alpha.com/careers"),
+            ("Celonis", "https://www.celonis.com/careers"),
+            ("Siemens AI Lab Munich", "https://jobs.siemens.com"),
+            ("BMW Group AI", "https://www.bmwgroup.com/en/career.html"),
+            ("MaibornWolff", "https://www.maibornwolff.de/karriere"),
+            ("Personio", "https://www.personio.com/about-personio/careers"),
+            ("Flixbus Data & AI", "https://www.flixbus.de/unternehmen/karriere"),
+            ("Rohde & Schwarz AI", "https://www.rohde-schwarz.com/careers"),
+        ],
+    },
+    "programming": {
+        "roles": ["Software Engineer", "Backend Developer", "Full-Stack Developer",
+                  "DevOps Engineer", "Platform Engineer", "Cloud Architect"],
+        "companies": [
+            ("Celonis", "https://www.celonis.com/careers"),
+            ("Personio", "https://www.personio.com/about-personio/careers"),
+            ("Flixbus Engineering", "https://www.flixbus.de/unternehmen/karriere"),
+            ("MaibornWolff", "https://www.maibornwolff.de/karriere"),
+            ("Scalable Capital", "https://de.scalable.capital/en/career"),
+            ("CHECK24 Tech", "https://www.check24.de/unternehmen/jobs"),
+            ("Stylight", "https://www.stylight.com/Jobs"),
+            ("XING (New Work SE)", "https://www.new-work.se/en/career"),
+        ],
+    },
+    "mathematics": {
+        "roles": ["Quantitative Analyst", "Actuary", "Data Analyst",
+                  "Operations Research Scientist", "Risk Analyst", "Statistician"],
+        "companies": [
+            ("Scalable Capital (Quant)", "https://de.scalable.capital/en/career"),
+            ("Munich Re", "https://www.munichre.com/en/company/career.html"),
+            ("Allianz Global Investors", "https://www.allianzgi.com/en/careers"),
+            ("MAN Energy Solutions", "https://www.man-es.com/company/careers"),
+            ("msg systems", "https://www.msg.group/karriere"),
+            ("KPMG Munich", "https://home.kpmg/de/de/home/careers.html"),
+        ],
+    },
+    "electrical": {
+        "roles": ["Embedded Systems Engineer", "Signal Processing Engineer",
+                  "Hardware Engineer", "FPGA Developer", "Power Electronics Engineer"],
+        "companies": [
+            ("Rohde & Schwarz", "https://www.rohde-schwarz.com/careers"),
+            ("Infineon Technologies", "https://www.infineon.com/cms/en/careers"),
+            ("Siemens Healthineers", "https://www.siemens-healthineers.com/careers"),
+            ("Airbus Defence Munich", "https://www.airbus.com/en/careers"),
+            ("Linde Engineering", "https://www.linde-engineering.com/en/careers"),
+            ("BMW Group Hardware", "https://www.bmwgroup.com/en/career.html"),
+        ],
+    },
+    "systems": {
+        "roles": ["Systems Engineer", "Security Engineer", "Network Engineer",
+                  "Cloud Infrastructure Engineer", "Site Reliability Engineer"],
+        "companies": [
+            ("Giesecke+Devrient (Security)", "https://www.gi-de.com/en/careers"),
+            ("secunet Security Networks", "https://www.secunet.com/karriere"),
+            ("Siemens Cyber Defense", "https://jobs.siemens.com"),
+            ("TÜV SÜD Digital", "https://www.tuvsud.com/en/career"),
+            ("Knorr-Bremse Systems", "https://www.knorr-bremse.com/en/career"),
+            ("MTU Aero Engines", "https://www.mtu.de/career"),
+        ],
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Hardcoded TUM elective catalogue (fallback)
@@ -432,6 +504,7 @@ class AdvisorAgent:
         """Initialise embedding client, Bedrock client, SQLite memory, and electives."""
         self.embeddings = EmbeddingsClient()
         self.bedrock = BedrockClient()
+        self.llm_cache = LLMCache()
         self.db = SQLiteMemory()
         self.electives = get_electives(self.db, force_refresh=force_refresh_electives)
         self.data_source = "api" if len(self.electives) > 15 else "fallback"
@@ -533,7 +606,10 @@ class AdvisorAgent:
             + "\n\nFor each elective, write one sentence explaining why it suits this student. "
             "Be specific about which grades or past courses make it a good fit."
         )
-        reasoning_text = self.bedrock.invoke(prompt, max_tokens=600)
+        cached_reasoning = self.llm_cache.get(prompt)
+        reasoning_text = cached_reasoning or self.bedrock.invoke(prompt, max_tokens=600)
+        if not cached_reasoning:
+            self.llm_cache.set(prompt, reasoning_text, ttl_seconds=86400)
         reasoning_lines = [
             line.strip("- ").strip()
             for line in reasoning_text.split("\n")
@@ -550,6 +626,31 @@ class AdvisorAgent:
                 }
             )
         return results
+
+    # ------------------------------------------------------------------
+    # Career path suggestion
+    # ------------------------------------------------------------------
+
+    def _career_section(self, direction: str, grades: dict) -> str:
+        """Build a career paths + Munich companies block for the given direction."""
+        info = CAREER_PATHS.get(direction, CAREER_PATHS["programming"])
+        roles = ", ".join(info["roles"][:4])
+        companies_md = "\n".join(
+            f"  - [{name}]({url})" for name, url in info["companies"]
+        )
+        grade_avg = ""
+        if grades:
+            nums = [float(v) for v in grades.values() if str(v).replace(".", "").isdigit()]
+            if nums:
+                avg = sum(nums) / len(nums)
+                grade_avg = f" (avg grade **{avg:.1f}**)"
+        return (
+            f"\n\n---\n## 🚀 Career Paths for Your Profile{grade_avg}\n"
+            f"**Top roles in your direction ({direction}):** {roles}\n\n"
+            f"**Munich companies hiring in this area:**\n{companies_md}\n\n"
+            f"> 💡 TUM's Career Center also lists student positions: "
+            f"[portal.myinterflex.de](https://portal.myinterflex.de)"
+        )
 
     # ------------------------------------------------------------------
     # Agent entry point
@@ -643,7 +744,13 @@ class AdvisorAgent:
             )
 
         self.db.save_profile("electives_count", len(self.electives))
-        return "\n".join(lines)
+
+        # Infer dominant direction from top recommendations
+        direction_votes = [rec["elective"].get("direction", "programming") for rec in recommendations]
+        dominant_direction = max(set(direction_votes), key=direction_votes.count) if direction_votes else "programming"
+
+        career = self._career_section(dominant_direction, profile.get("grades", {}))
+        return "\n".join(lines) + career
 
 
 if __name__ == "__main__":

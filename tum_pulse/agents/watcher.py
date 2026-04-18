@@ -148,15 +148,30 @@ class WatcherAgent:
         print("[WatcherAgent] No course data available — showing all deadlines unfiltered")
         return _empty
 
+    # Words too generic to use as sole matching signal in TUM context
+    _DEADLINE_STOPWORDS = frozenset({
+        "which", "their", "these", "those", "about", "other", "where",
+        "there", "using", "seminar", "systems", "master", "introduction",
+    })
+
+    @staticmethod
+    def _course_key_words(name: str) -> list[str]:
+        """Extract significant words from an enrolled course name."""
+        # Strip course codes like (IN2346) but keep (Robot Operating System)
+        clean = re.sub(r'\([A-Z]{1,4}\d{3,}[^)]*\)', '', name).lower()
+        return [
+            w for w in re.split(r'\W+', clean)
+            if len(w) > 3 and w not in WatcherAgent._DEADLINE_STOPWORDS
+        ]
+
     def _filter_by_enrollment(
         self, deadlines: list[dict], enrolled: list[str]
     ) -> list[dict]:
-        """Filter deadlines to only those matching the student's exact
-        enrolled course names from Moodle/TUMonline.
+        """Filter deadlines to only those relevant to the student's enrolled courses.
 
-        Uses exact substring matching — the enrolled course name must
-        appear verbatim inside the deadline title or course field.
-        Always keeps global exam-period deadlines and Moodle deadlines.
+        Uses word-overlap matching (≥2 significant words, or 1 for single-keyword
+        courses like Japanisch). Course codes (IN2346) are matched exactly.
+        Always passes through TUM Administration deadlines.
 
         Args:
             deadlines: Full list of deadline dicts.
@@ -168,36 +183,35 @@ class WatcherAgent:
         if not enrolled:
             return deadlines
 
-        enrolled_lower = [c.lower().strip() for c in enrolled if c.strip()]
-
         def _matches(deadline: dict) -> bool:
-            text = (
-                deadline.get("title", "") + " " +
-                deadline.get("course", "")
-            ).lower()
-            return any(course in text for course in enrolled_lower)
+            title = deadline.get("title", "")
+            course = deadline.get("course", "") or ""
+            if course == "TUM Administration":
+                return True
+            if title.startswith(("Exam Registration Deadline", "Course Registration",
+                                   "Re-enrollment", "Semester Contribution", "Exmatriculation")):
+                return True
+            text = (title + " " + course).lower()
+            for enr in enrolled:
+                codes = re.findall(r'[A-Z]{1,4}\d{3,}', enr)
+                if codes:
+                    # Course has a code — only match via that code, never by keywords alone
+                    if any(c.lower() in text for c in codes):
+                        return True
+                    continue
+                # No course code — fall back to word-overlap
+                words = self._course_key_words(enr)
+                if not words:
+                    continue
+                hits = sum(1 for w in words if w in text)
+                threshold = 1 if len(words) == 1 else 2
+                if hits >= threshold:
+                    return True
+            return False
 
-        filtered = []
-        for dl in deadlines:
-            # Always keep global/admin deadlines
-            if (
-                dl.get("title", "").startswith("Exam Registration Deadline") or
-                dl.get("course") == "TUM Administration" or
-                dl.get("title", "").startswith(("Course Registration", "Re-enrollment",
-                                                 "Semester Contribution", "Exmatriculation"))
-            ):
-                filtered.append(dl)
-                continue
-
-            if dl.get("source") == "moodle":
-                filtered.append(dl)
-                continue
-
-            if _matches(dl):
-                filtered.append(dl)
-
+        filtered = [dl for dl in deadlines if _matches(dl)]
         print(
-            f"[WatcherAgent] Exact enrollment filter: "
+            f"[WatcherAgent] Enrollment filter: "
             f"{len(deadlines)} → {len(filtered)} deadline(s)"
         )
         return filtered
