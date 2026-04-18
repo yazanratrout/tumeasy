@@ -2,8 +2,7 @@
 
 import json
 import re
-import time
-from typing import Any
+from collections import Counter
 
 import requests
 
@@ -183,31 +182,27 @@ def _classify_direction(text: str) -> str:
     return best if scores[best] > 0 else "programming"
 
 
-def _classify_difficulty(credits: Any, text: str) -> str:
+def _classify_difficulty(credits: float, text: str) -> str:
     text_lower = text.lower()
     if any(w in text_lower for w in ["advanced", "graduate", "research", "seminar", "master"]):
         return "hard"
-    if any(w in text_lower for w in ["introduction", "basic", "fundamentals", "beginner"]):
+    if any(w in text_lower for w in ["introduction", "basic", "fundamentals", "beginner", "introductory"]):
         return "easy"
-    try:
-        c = int(credits)
-        if c >= 8:
-            return "hard"
-        if c <= 3:
-            return "easy"
-    except (TypeError, ValueError):
-        pass
+    if credits >= 8:
+        return "hard"
+    elif credits <= 3:
+        return "easy"
     return "medium"
 
 
-def _extract_topics(text: str) -> list[str]:
-    clean = re.sub(r"<[^>]+>", " ", text)
-    words = re.findall(r"\b[a-zA-Z]{5,}\b", clean.lower())
+def _extract_topics(name: str, school: str, code: str) -> list[str]:
+    """Extract topic keywords from module name and school."""
+    text = f"{name} {school}".lower()
+    words = re.findall(r"\b[a-zA-Z]{5,}\b", text)
     stop = {
-        "which", "their", "these", "those", "about", "after", "before",
-        "through", "using", "based", "during", "other", "where", "students",
-        "course", "lecture", "exercise", "seminar", "module", "provide",
-        "learn", "understanding", "knowledge", "theory", "practical",
+        "which", "their", "these", "those", "about", "school", "chair",
+        "professorship", "professor", "munich", "technical", "university",
+        "offered", "department", "institute", "faculty",
     }
     seen: set[str] = set()
     topics: list[str] = []
@@ -215,8 +210,11 @@ def _extract_topics(text: str) -> list[str]:
         if w not in stop and w not in seen:
             topics.append(w)
             seen.add(w)
-        if len(topics) >= 6:
+        if len(topics) >= 5:
             break
+    prefix = code[:2].lower()
+    if prefix not in seen:
+        topics.append(prefix)
     return topics if topics else ["general"]
 
 
@@ -234,22 +232,33 @@ def fetch_electives_from_api() -> list[dict]:
     try:
         print("[AdvisorAgent] Fetching electives from TUM NAT API...")
 
-        resp = requests.get(
-            f"{TUM_API_BASE}/api/v1/mhb/module",
-            params={"limit": 200, "language": "en"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
+        # API max limit is 200 per page; paginate to collect up to 500 modules
+        PAGE_SIZE = 200
+        TARGET = 500
         modules: list = []
-        if isinstance(data, list):
-            modules = data
-        elif isinstance(data, dict):
-            for key in ("hits", "results", "data", "modules", "items"):
-                if key in data and isinstance(data[key], list):
-                    modules = data[key]
-                    break
+        offset = 0
+        while len(modules) < TARGET:
+            resp = requests.get(
+                f"{TUM_API_BASE}/api/v1/mhb/module",
+                params={"limit": PAGE_SIZE, "offset": offset},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            page: list = []
+            if isinstance(data, list):
+                page = data
+            elif isinstance(data, dict):
+                for key in ("hits", "results", "data", "modules", "items"):
+                    if key in data and isinstance(data[key], list):
+                        page = data[key]
+                        break
+            if not page:
+                break
+            modules.extend(page)
+            if len(page) < PAGE_SIZE:
+                break  # last page
+            offset += PAGE_SIZE
 
         if not modules:
             print("[AdvisorAgent] No modules returned from API — using hardcoded fallback")
@@ -260,42 +269,87 @@ def fetch_electives_from_api() -> list[dict]:
         electives: list[dict] = []
         seen_names: set[str] = set()
 
+        PREFIX_DIRECTION = {
+            "IN": "programming", "MA": "mathematics", "EI": "electrical",
+            "CIT": "programming", "WI": "programming", "PH": "mathematics",
+            "CH": "mathematics", "ME": "systems",
+        }
+        # Exact school keyword substrings that are genuinely STEM-relevant
+        RELEVANT_SCHOOL_KEYWORDS = {
+            "informatics", "mathematics", "electrical", "computation",
+            "natural sciences", "physics", "statistics",
+        }
+        # Module code prefixes for STEM departments
+        RELEVANT_PREFIXES = ("IN", "MA", "EI", "CIT", "WI", "CH", "PH", "ME", "MSE")
+
         for module in modules:
             name = (
-                module.get("module_name_en") or
-                module.get("name_en") or
-                module.get("title_en") or
-                module.get("name") or
-                module.get("title") or ""
+                module.get("module_title_en") or
+                module.get("module_title") or ""
             ).strip()
 
-            description = (
-                module.get("module_description_en") or
-                module.get("description_en") or
-                module.get("description") or
-                module.get("content") or
-                module.get("objectives") or
-                name
+            credits_str = module.get("module_credits") or "0"
+            try:
+                credits = float(credits_str)
+            except (ValueError, TypeError):
+                credits = 0.0
+
+            subtitle = (
+                module.get("module_subtitle_en") or
+                module.get("module_subtitle") or ""
             ).strip()
 
-            credits = module.get("ects") or module.get("credits") or module.get("credit_points") or 0
+            org = module.get("org") or {}
+            school_obj = (org.get("school") or {})
+            school = school_obj.get("org_name_en", "")
 
-            if not name or name in seen_names:
+            description = subtitle if subtitle else name
+            if school:
+                description = (
+                    f"{description}. Offered by {school}."
+                    if description != name
+                    else f"Offered by {school}."
+                )
+
+            code = module.get("module_code", "")
+
+            # Filter 1: Must have an English name
+            lang_tags = module.get("language_tags") or []
+            if "en" not in lang_tags and not module.get("module_title_en"):
                 continue
 
-            module_type = str(module.get("module_type", "") or module.get("type", "")).lower()
-            if any(t in module_type for t in ["pflicht", "compulsory", "mandatory", "core"]):
+            # Filter 2: Skip very short / missing names
+            if not name or len(name) < 4:
                 continue
 
-            full_text = f"{name} {description}"
+            # Filter 3: Keep only STEM modules — code prefix is primary gate,
+            # school name is secondary (for unlabelled codes)
+            school_lower = school.lower()
+            code_ok = any(code.startswith(p) for p in RELEVANT_PREFIXES)
+            school_ok = any(kw in school_lower for kw in RELEVANT_SCHOOL_KEYWORDS)
+            if not code_ok and not school_ok:
+                continue
+
+            # Filter 4: Skip modules with no ECTS
+            if credits == 0:
+                continue
+
+            if name in seen_names:
+                continue
+
+            prefix_dir = next(
+                (d for p, d in PREFIX_DIRECTION.items() if code.startswith(p)), None
+            )
+            direction = prefix_dir if prefix_dir else _classify_direction(f"{name} {school}")
+
             electives.append({
                 "name": name[:80],
                 "description": description[:200],
-                "topics": _extract_topics(description),
-                "difficulty": _classify_difficulty(credits, full_text),
-                "direction": _classify_direction(full_text),
+                "topics": _extract_topics(name, school, code),
+                "difficulty": _classify_difficulty(credits, name),
+                "direction": direction,
                 "credits": credits,
-                "module_id": module.get("id") or module.get("module_id", ""),
+                "module_id": code,
             })
             seen_names.add(name)
 
@@ -303,6 +357,8 @@ def fetch_electives_from_api() -> list[dict]:
             print("[AdvisorAgent] API returned modules but none passed filters — using hardcoded fallback")
             return SAMPLE_ELECTIVES
 
+        dir_counts = Counter(e["direction"] for e in electives)
+        print(f"[AdvisorAgent] Elective breakdown: {dict(dir_counts)}")
         print(f"[AdvisorAgent] Using {len(electives)} real electives from TUM NAT API")
         return electives
 
