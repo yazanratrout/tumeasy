@@ -488,7 +488,22 @@ def _background_scrape() -> None:
 
 if "startup_done" not in st.session_state:
     st.session_state.startup_done = True
-    threading.Thread(target=_background_scrape, daemon=True).start()
+    # Clear any stale mock deadlines that may be in DB from previous runs
+    _db.clear_deadlines(source="mock")
+    # Only start background scrape if we haven't fetched recently
+    _last = _db.get_last_fetched()
+    _should_fetch = True
+    if _last:
+        try:
+            from datetime import timedelta as _td
+            _age = datetime.now() - datetime.fromisoformat(_last)
+            if _age < _td(hours=2):
+                _should_fetch = False
+                print(f"[Startup] Cache is fresh ({int(_age.total_seconds()/60)}m old) — skipping scrape")
+        except ValueError:
+            pass
+    if _should_fetch:
+        threading.Thread(target=_background_scrape, daemon=True).start()
 
 # One-time cleanup of known mock deadline titles that pollute the cache
 _MOCK_TITLES = {

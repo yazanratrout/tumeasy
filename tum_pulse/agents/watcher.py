@@ -40,24 +40,26 @@ _GENERIC_WORDS = {
 # ---------------------------------------------------------------------------
 
 def _mock_tumonline() -> list[dict]:
+    """Return hardcoded mock TUMonline deadlines (never saved to DB)."""
     today = datetime.now()
     return [
         {"title": "Exam Registration: Analysis 2", "course": "Analysis 2",
-         "deadline_date": (today + timedelta(days=3)).strftime("%Y-%m-%d"), "source": "tumonline"},
+         "deadline_date": (today + timedelta(days=3)).strftime("%Y-%m-%d"), "source": "mock"},
         {"title": "Homework Sheet 5 Submission", "course": "Algorithms and Data Structures",
-         "deadline_date": (today + timedelta(days=5)).strftime("%Y-%m-%d"), "source": "tumonline"},
+         "deadline_date": (today + timedelta(days=5)).strftime("%Y-%m-%d"), "source": "mock"},
         {"title": "Lab Report 2", "course": "Practical Course: Machine Learning",
-         "deadline_date": (today + timedelta(days=10)).strftime("%Y-%m-%d"), "source": "tumonline"},
+         "deadline_date": (today + timedelta(days=10)).strftime("%Y-%m-%d"), "source": "mock"},
     ]
 
 
 def _mock_moodle() -> list[dict]:
+    """Return hardcoded mock Moodle deadlines (never saved to DB)."""
     today = datetime.now()
     return [
         {"title": "Quiz: Probability Theory Chapter 3", "course": "Introduction to Probability",
-         "deadline_date": (today + timedelta(days=2)).strftime("%Y-%m-%d"), "source": "moodle"},
+         "deadline_date": (today + timedelta(days=2)).strftime("%Y-%m-%d"), "source": "mock"},
         {"title": "Project Milestone 1", "course": "Software Engineering",
-         "deadline_date": (today + timedelta(days=7)).strftime("%Y-%m-%d"), "source": "moodle"},
+         "deadline_date": (today + timedelta(days=7)).strftime("%Y-%m-%d"), "source": "mock"},
     ]
 
 
@@ -570,14 +572,24 @@ class WatcherAgent:
         except Exception as exc:
             print(f"[WatcherAgent] Confluence scrape error: {exc}")
 
-        # Persist to SQLite (INSERT OR IGNORE deduplication)
+        # Only persist LIVE deadlines — never save mock/fallback data
+        # so the DB stays clean and only contains real student data.
+        live_sources = {
+            src for src, state in self.status.items() if state == "live"
+        }
+        saved = 0
         for dl in all_deadlines:
-            self.db.save_deadline(
-                title=dl["title"],
-                course=dl["course"],
-                deadline_date=dl["deadline_date"],
-                source=dl["source"],
-            )
+            if dl.get("source") in live_sources:
+                self.db.save_deadline(
+                    title=dl["title"],
+                    course=dl["course"],
+                    deadline_date=dl["deadline_date"],
+                    source=dl["source"],
+                )
+                saved += 1
+
+        print(f"[WatcherAgent] Saved {saved} live deadline(s) to DB "
+              f"(skipped {len(all_deadlines) - saved} mock/fallback)")
 
         if not all_deadlines:
             return "No deadlines found from any source."
