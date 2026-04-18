@@ -35,6 +35,9 @@ class SQLiteMemory:
                     created_at   TEXT    DEFAULT (datetime('now'))
                 );
 
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_deadlines_unique
+                    ON deadlines (title, source, deadline_date);
+
                 CREATE TABLE IF NOT EXISTS student_profile (
                     key   TEXT PRIMARY KEY,
                     value TEXT
@@ -55,6 +58,25 @@ class SQLiteMemory:
                     sent          INTEGER DEFAULT 0,
                     created_at    TEXT    DEFAULT (datetime('now'))
                 );
+
+                -- Course material metadata cached from Moodle on login
+                CREATE TABLE IF NOT EXISTS course_materials (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    course_name TEXT NOT NULL,
+                    file_name   TEXT NOT NULL,
+                    url         TEXT,
+                    file_type   TEXT,
+                    fetched_at  TEXT DEFAULT (datetime('now'))
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_materials_unique
+                    ON course_materials (course_name, file_name);
+
+                -- Key/value store for cache timestamps and fetch state
+                CREATE TABLE IF NOT EXISTS cache_metadata (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT
+                );
             """)
 
     # ------------------------------------------------------------------
@@ -71,10 +93,10 @@ class SQLiteMemory:
         """Insert a deadline and return its new row id."""
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute(
-                "INSERT INTO deadlines (title, course, deadline_date, source) VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO deadlines (title, course, deadline_date, source) VALUES (?, ?, ?, ?)",
                 (title, course, deadline_date, source),
             )
-            return cur.lastrowid
+            return cur.lastrowid or 0
 
     def get_upcoming_deadlines(self, days: int = 7) -> list[dict]:
         """Return deadlines within the next *days* days, sorted by date."""
@@ -87,6 +109,73 @@ class SQLiteMemory:
                 (today, cutoff),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def clear_deadlines(self, source: str | None = None) -> int:
+        """Delete deadlines from the database.
+
+        Args:
+            source: If provided, only delete deadlines from this source
+                    (e.g. 'mock', 'tumonline', 'moodle').
+                    If None, deletes ALL deadlines.
+
+        Returns:
+            Number of rows deleted.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            if source:
+                cur = conn.execute(
+                    "DELETE FROM deadlines WHERE source = ?", (source,)
+                )
+            else:
+                cur = conn.execute("DELETE FROM deadlines")
+            return cur.rowcount
+
+    def get_upcoming_deadlines_filtered(
+        self, days: int = 7, enrolled_courses: list[str] | None = None
+    ) -> list[dict]:
+        """Return upcoming deadlines filtered by enrolled courses.
+
+        Same as get_upcoming_deadlines() but applies keyword filtering
+        against the student's enrolled course list so mock/irrelevant
+        deadlines are excluded.
+
+        Args:
+            days: Number of days ahead to look.
+            enrolled_courses: List of course name strings to filter by.
+                              If None or empty, returns all deadlines.
+
+        Returns:
+            Filtered and sorted list of deadline dicts.
+        """
+        deadlines = self.get_upcoming_deadlines(days=days)
+
+        if not enrolled_courses:
+            return deadlines
+
+        _GENERIC = {
+            "introduction", "advanced", "applied", "practical",
+            "fundamentals", "basics", "overview", "seminar",
+            "lecture", "course", "study", "studies", "special",
+            "topics", "selected", "principles",
+        }
+        kws: set[str] = set()
+        for name in enrolled_courses:
+            for word in name.split():
+                w = word.lower().rstrip("0123456789")
+                if len(w) > 3 and w not in _GENERIC:
+                    kws.add(w)
+
+        if not kws:
+            return deadlines
+
+        return [
+            d for d in deadlines
+            if d["title"].startswith("Exam Registration") or
+            any(
+                kw in (d["title"] + " " + d.get("course", "")).lower()
+                for kw in kws
+            )
+        ]
 
     # ------------------------------------------------------------------
     # Student profile
@@ -156,6 +245,97 @@ class SQLiteMemory:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM alerts WHERE sent = 0 ORDER BY deadline_date"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Course materials cache
+    # ------------------------------------------------------------------
+
+    def save_course_materials(self, course_name: str, materials: list[dict]) -> None:
+        """Replace all cached materials for a course (upsert by course+file_name)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM course_materials WHERE course_name = ?",
+                (course_name,)
+            )
+            conn.executemany(
+                "INSERT OR REPLACE INTO course_materials "
+                "(course_name, file_name, url, file_type) VALUES (?, ?, ?, ?)",
+                [
+                    (
+                        course_name,
+                        m.get("name", ""),
+                        m.get("url", ""),
+                        m.get("file_type", "pdf"),
+                    )
+                    for m in materials
+                ],
+            )
+
+    def get_course_materials(self, course_name: str) -> list[dict]:
+        """Return cached material metadata for a course."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT file_name AS name, url, file_type FROM course_materials "
+                "WHERE course_name = ? ORDER BY file_name",
+                (course_name,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_course_materials(self) -> dict[str, list[dict]]:
+        """Return all cached materials grouped by course name."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT course_name, file_name AS name, url, file_type "
+                "FROM course_materials ORDER BY course_name, file_name"
+            ).fetchall()
+        result: dict[str, list[dict]] = {}
+        for r in rows:
+            d = dict(r)
+            course = d.pop("course_name")
+            result.setdefault(course, []).append(d)
+        return result
+
+    # ------------------------------------------------------------------
+    # Cache metadata (last_fetched, fetch status)
+    # ------------------------------------------------------------------
+
+    def save_cache_meta(self, key: str, value: str) -> None:
+        """Store a key/value pair in the cache_metadata table."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO cache_metadata (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+
+    def get_cache_meta(self, key: str) -> Optional[str]:
+        """Retrieve a value from cache_metadata by key."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT value FROM cache_metadata WHERE key = ?", (key,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def save_last_fetched(self, iso_timestamp: str) -> None:
+        """Record the timestamp of the last successful data fetch."""
+        self.save_cache_meta("last_fetched", iso_timestamp)
+
+    def get_last_fetched(self) -> Optional[str]:
+        """Return the ISO timestamp of the last successful data fetch, or None."""
+        return self.get_cache_meta("last_fetched")
+
+    def get_deadlines_for_range(self, from_date: str, to_date: str) -> list[dict]:
+        """Return deadlines within an explicit date range (ISO YYYY-MM-DD)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM deadlines WHERE deadline_date BETWEEN ? AND ? "
+                "ORDER BY deadline_date",
+                (from_date, to_date),
             ).fetchall()
         return [dict(r) for r in rows]
 

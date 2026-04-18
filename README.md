@@ -1,106 +1,236 @@
-# makeathon
-AWS examples for a makeathon
+# TUM Easy — Campus Co-Pilot for TUM 🎓
 
-# Quickstart Guide
-🚀 Check out this document [Quick Start Guide](./Makeathon%20AWS%20Quickstart%20Guide.pdf)
-1. Login
-2. Roles & Permissions
-3. Access Keys
-4. Sagemaker AI Platform & Jupyter Notebooks
-5. S3 Storage
+TUM Easy is a multi-agent AI assistant designed to unify and simplify the fragmented digital ecosystem at the Technical University of Munich (TUM).
+
+It connects platforms like **TUMonline**, **Moodle**, **ZHS**, and **Confluence / Collab Wiki** into a single intelligent interface that can retrieve information, recommend actions, and automate repetitive student tasks.
 
 ---
 
-# 🟦 TypeScript Examples
+## 🚀 Why TUM Easy?
 
-All TypeScript examples (Bedrock, S3, S3 Vectors, LangChain, RAG) are in the [`typescript/`](./typescript/) folder with their own setup, docs, and README.
+TUM students rely on multiple disconnected systems:
 
-👉 **[Go to TypeScript README](./typescript/README.md)**
+- **TUMonline** → courses, exams, registrations  
+- **Moodle** → lecture materials and deadlines  
+- **ZHS** → sports course booking  
+- **Collab Wiki / Confluence** → project/course documentation  
 
-Quick overview of what's inside:
+This leads to:
+- missed deadlines  
+- inefficient manual checking  
+- scattered information  
+- unnecessary stress  
 
-| Script | File | What it does |
-|---|---|---|
-| `npm run verify` | [`src/verify.ts`](./typescript/src/verify.ts) | Check your credentials work |
-| `npm run bedrock` | [`src/bedrock.ts`](./typescript/src/bedrock.ts) | Invoke any Bedrock model (simple + streaming) |
-| `npm run s3` | [`src/s3.ts`](./typescript/src/s3.ts) | Upload / download / list S3 objects |
-| `npm run rag` | [`src/rag.ts`](./typescript/src/rag.ts) | Full RAG pipeline with S3 Vectors (raw SDK) |
-| `npm run langchain` | [`src/langchain-rag.ts`](./typescript/src/langchain-rag.ts) | RAG with LangChain + Bedrock |
-
----
-
-# 🐍 Python Examples 
+**TUM Easy solves this by acting as a personal campus co-pilot.**
 
 ---
 
-# Examples
-Make sure you never store access keys in a public location!
-In the python/py folder you can find example files for s3 and Bedrock access as well.
+## 🧠 Core Features
 
-## Prerequisites
-If you run the example files locally you should follow these steps!
-### Create a virtual python environment
-1. Create a virtual python environment `python3 -m venv .venv`
-2. Activate the virtual environment `source .venv/bin/activate`
-3. Install the required libraries `pip install -r requirements.txt`
+### 📅 Deadline Watcher
+Aggregates deadlines from:
+- TUMonline
+- Moodle
+- Confluence
 
-Source: https://docs.python.org/3/library/venv.html
-
-### Create AWS Access key
-1. Create an AWS Access key [Link](https://docs.aws.amazon.com/IAM/latest/UserGuide/access-key-self-managed.html)
-2. Create a copy of the `.env.example` file and name it `.env`
-3. Store the `Key ID` and the `Key Secret` in the `.env` file
-
-**WARNING** Make sure you NEVER add these keys to a public repository!
-
-## Notebook examples
-With minor adjustments you can run all the examples on [AWS Sagemaker Notebooks](https://docs.aws.amazon.com/sagemaker/latest/dg/nbi.html). This makes the setup easier in many cases, as it integrates very well with the AWS environment and other services.
-### S3 Access
-Checkout the [S3_Example.ipynb](./S3_Example.ipynb) notebook. →
-
-### Bedrock Access
-Checkout the [Bedrock_Example.ipynb](./Bedrock_Example.ipynb) notebook. →
-
-### A simple langgraph agent with RAG
-Check out the [RAG_agent_example](https://github.com/DataReply/makeathon/blob/main/python/notebooks/RAG_agent_example.ipynb) repository to find a simple langgraph agent using s3vectors to run similarity queries.
-
-## .py files
-There are example files to access bedrock and s3 from .py files as well under ```/python/py/```
+Features:
+- unified deadline view  
+- SQLite caching  
+- course-based filtering  
+- upcoming alerts  
 
 ---
 
-# 💡 Tips
+### 📚 Elective Advisor
+Recommends electives using AI.
 
-## Connect LangChain docs to your AI coding assistant
+Features:
+- TUM module API integration  
+- semantic matching via embeddings  
+- personalized suggestions based on profile and grades  
 
-If you're using an AI coding assistant (Cursor, Windsurf, Claude Code, GitHub Copilot, etc.), you can give it **direct access to the latest LangChain documentation** via their MCP server. This means your assistant will give you accurate, up-to-date LangChain code instead of hallucinating outdated APIs.
+---
 
-**MCP Server URL:**
+### 🧠 Learning Buddy
+Helps you study smarter.
+
+Features:
+- downloads Moodle PDFs  
+- extracts lecture content  
+- analyzes past exams  
+- generates structured study plans  
+
+---
+
+### 🏃 ZHS Sports Assistant
+Automates sport course interaction.
+
+Features:
+- search ZHS courses  
+- display available slots  
+- attempt registration via automation  
+
+---
+
+### 💬 Conversational Interface
+Single chat interface powered by multi-agent system.
+
+Agents:
+- Watcher → deadlines  
+- Advisor → electives  
+- Learning Buddy → studying  
+- Executor → actions (ZHS)  
+- General Assistant → fallback  
+
+---
+
+## 🏗 Architecture
+
+User → Streamlit UI → LangGraph Orchestrator → Agents → External Systems → SQLite
+
+---
+
+## 🛠 Tech Stack
+
+**Frontend**
+- Streamlit
+
+**Backend**
+- Python 3.10+
+
+**AI**
+- Amazon Bedrock (Claude)
+- Amazon Titan Embeddings
+
+**Agents**
+- LangGraph
+- LangChain components
+
+**Automation & Data**
+- Playwright
+- Requests / BeautifulSoup
+- PyMuPDF
+
+**Storage**
+- SQLite
+
+---
+
+## 📁 Project Structure
+
 ```
-https://docs.langchain.com/mcp
+tum_pulse/
+├── main.py
+├── agents/
+├── connectors/
+├── memory/
+├── tools/
 ```
 
-**Claude Code:**
+---
+
+## ⚙️ Setup
+
+### 1. Clone repo
 ```bash
-claude mcp add --transport http docs-langchain https://docs.langchain.com/mcp
+git clone <repo-url>
+cd <repo>
 ```
 
-**Cursor / Windsurf** — add to your MCP settings (`.cursor/mcp.json` or equivalent):
-```json
-{
-  "mcpServers": {
-    "langchain-docs": {
-      "type": "http",
-      "url": "https://docs.langchain.com/mcp"
-    }
-  }
-}
+### 2. Create environment
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-Once connected, your assistant can search LangChain, LangGraph, and LangSmith docs in real time. More details: [docs.langchain.com/use-these-docs](https://docs.langchain.com/use-these-docs)
+### 3. Install dependencies
+```bash
+pip install -r requirements.txt
+```
 
-## Other useful tips
+### 4. Install Playwright
+```bash
+playwright install
+```
 
-- **Always use `eu.` inference profile IDs** for Bedrock models to keep data in EU regions. Here's anyway all models you can choose from and their inference profile IDs [Bedrock Inference Profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html)
-- **Don't commit your keys and don't share them publicly**
-- **S3 bucket names must be lowercase** — only letters, numbers, and hyphens, globally unique
+---
+
+## 🔐 Environment Variables
+
+Create `.env` file:
+
+```
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=
+
+TUM_USERNAME=
+TUM_PASSWORD=
+
+ZHS_USERNAME=
+ZHS_PASSWORD=
+
+CONFLUENCE_URL=
+CONFLUENCE_USERNAME=
+CONFLUENCE_PASSWORD=
+CONFLUENCE_PAT=
+```
+
+---
+
+## ▶️ Run the App
+
+```bash
+streamlit run tum_pulse/main.py
+```
+
+---
+
+## ⚠️ Current Status
+
+Working:
+- multi-agent routing  
+- Streamlit UI  
+- elective recommendations  
+- deadline aggregation  
+- study plan generation  
+
+Partial / fallback:
+- some APIs use mock data  
+- scraping depends on login/session  
+- ZHS automation may require setup  
+
+---
+
+## 🚧 Limitations
+
+- depends on external platform stability  
+- login flows may change  
+- requires valid credentials  
+- automation is environment-dependent  
+
+---
+
+## 🔮 Future Work
+
+- calendar integration  
+- Mensa API  
+- room finder  
+- push notifications  
+- improved personalization  
+
+---
+
+## 🧪 Hackathon Context
+
+Built as part of a Campus Co-Pilot challenge:
+
+> Students should not have to behave like APIs between university systems.
+
+---
+
+## ⚠️ Responsible Use
+
+- do not abuse university systems  
+- protect credentials  
+- respect platform limits  
