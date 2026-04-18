@@ -186,7 +186,17 @@ class LearningBuddyAgent:
 
                 print(f"  [{cid}] {text[:70]}")
 
+                import re as _re
                 score = 0.0
+
+                # Extract numbers from both strings — number must match exactly
+                search_numbers = set(_re.findall(r'\b\d+\b', search_lower))
+                text_numbers = set(_re.findall(r'\b\d+\b', text_lower))
+
+                # If search has a number and text has a different number → heavy penalty
+                number_conflict = bool(search_numbers and text_numbers and
+                                       not search_numbers.intersection(text_numbers))
+                number_match = bool(search_numbers and search_numbers.intersection(text_numbers))
 
                 # Strategy A: Direct string matching
                 if search_lower == text_lower:
@@ -196,14 +206,24 @@ class LearningBuddyAgent:
                 elif text_lower in search_lower:
                     score = 0.85
                 else:
-                    # Strategy B: Word overlap (handles partial matches)
-                    search_words = [w for w in search_lower.split() if len(w) > 3]
-                    text_words = [w for w in text_lower.split() if len(w) > 3]
+                    # Strategy B: Word overlap (ignore pure numbers — handled separately)
+                    search_words = [w for w in search_lower.split()
+                                    if len(w) > 2 and not w.isdigit()]
+                    text_words = [w for w in text_lower.split()
+                                  if len(w) > 2 and not w.isdigit()]
                     if search_words and text_words:
                         forward = sum(1 for w in search_words if any(
                             w in tw or tw in w for tw in text_words
                         ))
                         score = forward / len(search_words)
+
+                # Boost if numbers match (e.g. both have "3")
+                if number_match:
+                    score = min(1.0, score + 0.3)
+
+                # Heavy penalty if numbers conflict (search has "3", text has "1")
+                if number_conflict:
+                    score = score * 0.2
 
                 # Strategy C: Match via course code in brackets e.g. (IN2228)
                 code_match = re.search(r"\b([A-Z]{2,3}\d{4,5})\b", search_name.upper())
