@@ -261,62 +261,62 @@ class TUMonlineConnector:
 
         return result
 
-    def debug_api_responses(self, username: str, password: str) -> None:
-        """Print raw API responses to identify correct field names for grades."""
+    def debug_grades_page(self, username: str, password: str) -> None:
+        """Navigate to known TUMonline grade pages and print their URLs and HTML structure."""
         from playwright.sync_api import sync_playwright
 
+        GRADE_URLS = [
+            "/tumonline/wbStELP.cbSEL",
+            "/tumonline/wbStuPla.cbStuProgress",
+            "/tumonline/wbStuPla.cbPruefungen",
+            "/tumonline/wbPrfList.cbShowLV",
+            "/tumonline/wbPrfList.cbShowAll",
+            "/tumonline/wbKUVKU.cbSEL",
+            "/tumonline/wbStELPV.cbSEL",
+            "/tumonline/wbStNotenDaten.cbNotenDaten",
+            "/tumonline/wbStNotenSpiegel.cbNotenSpiegel",
+        ]
+
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            browser = pw.chromium.launch(headless=False)
             page = browser.new_page()
             try:
                 if not self.login(page, username, password):
                     print("Login failed")
                     return
 
-                page.goto(
-                    "https://campus.tum.de/tumonline/ee/ui/ca2/app/desktop/#/home?$ctx=lang=en",
-                    timeout=20_000,
-                )
-                page.wait_for_load_state("networkidle", timeout=15_000)
-                page.wait_for_timeout(1000)
+                for url in GRADE_URLS:
+                    try:
+                        full_url = "https://campus.tum.de" + url
+                        page.goto(full_url, timeout=15_000)
+                        page.wait_for_load_state("networkidle", timeout=10_000)
 
-                token_data = page.evaluate("""async () => {
-                    const r = await fetch('/tumonline/ee/rest/auth/token/refresh', {
-                        method: 'POST',
-                        headers: {Accept: 'application/json', 'Content-Type': 'application/json'},
-                        body: '{}'
-                    });
-                    return r.ok ? await r.json() : {};
-                }""")
-                token = token_data.get("accessToken", "")
-                if not token:
-                    print("No token")
-                    return
+                        final_url = page.url
+                        title = page.title()
+                        body_text = page.inner_text("body")[:300].strip()
+                        has_table = page.locator("table").count() > 0
+                        has_grade = any(g in body_text.lower() for g in
+                                        ["grade", "note", "prüfung", "ects", "bestanden"])
 
-                token_js = json.dumps(token)
+                        print(f"\n{'='*60}")
+                        print(f"URL tried: {url}")
+                        print(f"Final URL: {final_url}")
+                        print(f"Title: {title}")
+                        print(f"Has table: {has_table} | Has grade content: {has_grade}")
+                        print(f"Body preview: {body_text[:200]}")
 
-                endpoints = [
-                    "/tumonline/ee/rest/slc.tm.cp/student/myExaminations?$top=3",
-                    "/tumonline/ee/rest/slc.tm.cp/student/myExaminations?$filter=statusId-eq=POS&$top=3",
-                    "/tumonline/ee/rest/slc.tm.cp/student/myResults?$top=3",
-                    "/tumonline/ee/rest/slc.tm.cp/student/myAchievements?$top=3",
-                    "/tumonline/ee/rest/slc.tm.cp/student/myGrades?$top=3",
-                ]
+                        if has_grade or has_table:
+                            print(">>> PROMISING PAGE - printing table structure:")
+                            tables = page.locator("table").all()
+                            for i, table in enumerate(tables[:2]):
+                                print(f"  Table {i}: {table.inner_text()[:400]}")
 
-                for endpoint in endpoints:
-                    result = page.evaluate(f"""async () => {{
-                        const r = await fetch('{endpoint}',
-                            {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}}}
-                        );
-                        const status = r.status;
-                        const body = r.ok ? await r.json() : await r.text();
-                        return {{status, body}};
-                    }}""")
-                    print(f"\n{'='*50}")
-                    print(f"ENDPOINT: {endpoint}")
-                    print(f"STATUS: {result.get('status')}")
-                    body = result.get("body", {})
-                    print(f"RESPONSE (first 500 chars): {json.dumps(body)[:500]}")
+                    except Exception as exc:
+                        print(f"URL {url} failed: {exc}")
+
+                print("\n\nBrowser staying open for 30s — check manually if needed")
+                page.wait_for_timeout(30_000)
+
             finally:
                 browser.close()
 
@@ -351,18 +351,21 @@ class TUMonlineConnector:
 
 if __name__ == "__main__":
     import os
+    import sys
     from dotenv import load_dotenv
     load_dotenv()
     username = os.getenv("TUM_USERNAME", "")
     password = os.getenv("TUM_PASSWORD", "")
     if not username or not password:
         print("Set TUM_USERNAME and TUM_PASSWORD in .env to test")
+        sys.exit(1)
+
+    if "--debug-grades" in sys.argv:
+        print("=== Finding grades page ===")
+        TUMonlineConnector().debug_grades_page(username, password)
     else:
-        print("=== Debugging API responses for grade endpoints ===")
-        TUMonlineConnector().debug_api_responses(username, password)
-        print("\n=== Full scrape with courses and grades ===")
+        print("=== Full scrape ===")
         result = TUMonlineConnector().scrape_with_courses(username, password)
         courses = result["courses"]
-        print(f"Enrolled ({len(courses['enrolled'])}): {courses['enrolled'][:5]}")
-        print(f"Grades ({len(courses['grades'])}): {dict(list(courses['grades'].items())[:5])}")
-        print(f"All courses ({len(courses['all_courses'])}): {courses['all_courses'][:5]}")
+        print(f"Enrolled: {courses['enrolled']}")
+        print(f"Grades: {courses['grades']}")
