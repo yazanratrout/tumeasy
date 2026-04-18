@@ -383,6 +383,22 @@ with st.sidebar:
 
     st.divider()
 
+    _electives_count = SQLiteMemory().get_profile("electives_count") or 0
+    if _electives_count > 15:
+        st.caption(f"📚 {_electives_count} real TUM electives loaded")
+    else:
+        st.caption("📚 Using sample elective catalogue")
+
+    if st.button("🔄 Refresh Electives", use_container_width=True):
+        from tum_pulse.agents.advisor import get_electives
+        _edb = SQLiteMemory()
+        _fresh = get_electives(_edb, force_refresh=True)
+        _edb.save_profile("electives_count", len(_fresh))
+        st.success(f"Loaded {len(_fresh)} electives!")
+        st.rerun()
+
+    st.divider()
+
     st.markdown("**🔔 Upcoming (next 2 days)**")
     _imminent = SQLiteMemory().get_upcoming_deadlines(days=2)
     if _imminent:
