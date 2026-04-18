@@ -58,6 +58,25 @@ class SQLiteMemory:
                     sent          INTEGER DEFAULT 0,
                     created_at    TEXT    DEFAULT (datetime('now'))
                 );
+
+                -- Course material metadata cached from Moodle on login
+                CREATE TABLE IF NOT EXISTS course_materials (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    course_name TEXT NOT NULL,
+                    file_name   TEXT NOT NULL,
+                    url         TEXT,
+                    file_type   TEXT,
+                    fetched_at  TEXT DEFAULT (datetime('now'))
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_materials_unique
+                    ON course_materials (course_name, file_name);
+
+                -- Key/value store for cache timestamps and fetch state
+                CREATE TABLE IF NOT EXISTS cache_metadata (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT
+                );
             """)
 
     # ------------------------------------------------------------------
@@ -159,6 +178,97 @@ class SQLiteMemory:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM alerts WHERE sent = 0 ORDER BY deadline_date"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Course materials cache
+    # ------------------------------------------------------------------
+
+    def save_course_materials(self, course_name: str, materials: list[dict]) -> None:
+        """Replace all cached materials for a course (upsert by course+file_name)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM course_materials WHERE course_name = ?",
+                (course_name,)
+            )
+            conn.executemany(
+                "INSERT OR REPLACE INTO course_materials "
+                "(course_name, file_name, url, file_type) VALUES (?, ?, ?, ?)",
+                [
+                    (
+                        course_name,
+                        m.get("name", ""),
+                        m.get("url", ""),
+                        m.get("file_type", "pdf"),
+                    )
+                    for m in materials
+                ],
+            )
+
+    def get_course_materials(self, course_name: str) -> list[dict]:
+        """Return cached material metadata for a course."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT file_name AS name, url, file_type FROM course_materials "
+                "WHERE course_name = ? ORDER BY file_name",
+                (course_name,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_course_materials(self) -> dict[str, list[dict]]:
+        """Return all cached materials grouped by course name."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT course_name, file_name AS name, url, file_type "
+                "FROM course_materials ORDER BY course_name, file_name"
+            ).fetchall()
+        result: dict[str, list[dict]] = {}
+        for r in rows:
+            d = dict(r)
+            course = d.pop("course_name")
+            result.setdefault(course, []).append(d)
+        return result
+
+    # ------------------------------------------------------------------
+    # Cache metadata (last_fetched, fetch status)
+    # ------------------------------------------------------------------
+
+    def save_cache_meta(self, key: str, value: str) -> None:
+        """Store a key/value pair in the cache_metadata table."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO cache_metadata (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+
+    def get_cache_meta(self, key: str) -> Optional[str]:
+        """Retrieve a value from cache_metadata by key."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT value FROM cache_metadata WHERE key = ?", (key,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def save_last_fetched(self, iso_timestamp: str) -> None:
+        """Record the timestamp of the last successful data fetch."""
+        self.save_cache_meta("last_fetched", iso_timestamp)
+
+    def get_last_fetched(self) -> Optional[str]:
+        """Return the ISO timestamp of the last successful data fetch, or None."""
+        return self.get_cache_meta("last_fetched")
+
+    def get_deadlines_for_range(self, from_date: str, to_date: str) -> list[dict]:
+        """Return deadlines within an explicit date range (ISO YYYY-MM-DD)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM deadlines WHERE deadline_date BETWEEN ? AND ? "
+                "ORDER BY deadline_date",
+                (from_date, to_date),
             ).fetchall()
         return [dict(r) for r in rows]
 

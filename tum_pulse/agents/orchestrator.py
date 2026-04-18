@@ -195,11 +195,18 @@ def router_node(state: OrchestratorState) -> OrchestratorState:
 
 
 def watcher_node(state: OrchestratorState) -> OrchestratorState:
-    """Delegate to WatcherAgent for deadline queries."""
+    """Delegate to WatcherAgent for deadline queries.
+
+    Passes the user's original message so the time range is parsed
+    correctly (e.g. 'deadlines this month' → 30 days).
+    Passes context so weak subjects are flagged in the response.
+    """
     agent = WatcherAgent()
-    # Run the scraper then return this week's deadlines for the response
     agent.run()
-    response = agent.get_this_week()
+    response = agent.get_this_week(
+        user_input=state.get("user_input", ""),
+        context=state.get("context", {}),
+    )
     return {**state, "response": response}
 
 

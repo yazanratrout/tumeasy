@@ -6,6 +6,7 @@ Scraper hierarchy per source:
   Confluence → atlassian-python-api → skipped (not a hard error)
 """
 
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,12 @@ from tum_pulse.config import (
 from tum_pulse.memory.database import SQLiteMemory
 
 TUM_API_BASE = "https://api.srv.nat.tum.de"
+
+_GENERIC_WORDS = {
+    "introduction", "advanced", "applied", "practical", "principles",
+    "fundamentals", "basics", "overview", "seminar", "lecture",
+    "course", "study", "studies", "special", "topics", "selected",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +146,13 @@ class WatcherAgent:
         print("[WatcherAgent] No course data available — showing all deadlines unfiltered")
         return _empty
 
-    def _filter_by_enrollment(self, deadlines: list[dict], enrolled: list[str]) -> list[dict]:
-        """Filter deadlines to those relevant to enrolled courses.
+    def _filter_by_enrollment(
+        self, deadlines: list[dict], enrolled: list[str]
+    ) -> list[dict]:
+        """Filter deadlines to only those matching the student's enrolled courses.
 
-        Always keeps global exam-period deadline rows. Skips filtering when
-        *enrolled* is empty. Excludes generic academic prefix words from keywords.
+        Always keeps global exam-period deadline rows.
+        Skips filtering when enrolled is empty.
 
         Args:
             deadlines: Full list of deadline dicts.
@@ -155,33 +164,77 @@ class WatcherAgent:
         if not enrolled:
             return deadlines
 
-        _GENERIC_WORDS = {
-            "introduction", "advanced", "applied", "practical", "principles",
-            "fundamentals", "basics", "overview", "seminar", "lecture",
-            "course", "study", "studies", "special", "topics", "selected",
-        }
-
-        keywords: set[str] = set()
+        kws: set[str] = set()
         for name in enrolled:
             for word in name.split():
                 w = word.lower().rstrip("0123456789")
                 if len(w) > 3 and w not in _GENERIC_WORDS:
-                    keywords.add(w)
+                    kws.add(w)
 
-        filtered: list[dict] = []
-        for dl in deadlines:
-            if dl["title"].startswith("Exam Registration Deadline"):
-                filtered.append(dl)
-                continue
-            text = (dl["title"] + " " + dl["course"]).lower()
-            if any(kw in text for kw in keywords):
-                filtered.append(dl)
+        filtered = [
+            d for d in deadlines
+            if d["title"].startswith("Exam Registration") or
+            any(kw in (d["title"] + " " + d.get("course", "")).lower() for kw in kws)
+        ]
 
         print(
-            f"[WatcherAgent] Enrollment filter: {len(deadlines)} → {len(filtered)} deadline(s) "
-            f"({len(enrolled)} enrolled courses, {len(keywords)} keywords)"
+            f"[WatcherAgent] Enrollment filter: "
+            f"{len(deadlines)} → {len(filtered)} deadline(s) "
+            f"({len(enrolled)} enrolled courses, {len(kws)} keywords)"
         )
         return filtered
+
+    def _parse_time_range(self, user_input: str) -> tuple[int, str]:
+        """Parse a natural-language time expression into (days, human_label).
+
+        Covers English and German expressions. Falls back to 7 days.
+
+        Examples:
+            "what's due today"           →  (1,  "today")
+            "deadlines this week"        →  (7,  "this week")
+            "anything in the next month" →  (30, "this month")
+            "next 2 weeks"               →  (14, "next 2 weeks")
+            "nächste woche"              →  (14, "next two weeks")
+        """
+        text = user_input.lower()
+
+        m = re.search(r"(\d+)\s*days?", text)
+        if m:
+            d = int(m.group(1))
+            return d, f"next {d} day{'s' if d > 1 else ''}"
+
+        m = re.search(r"(\d+)\s*weeks?", text)
+        if m:
+            w = int(m.group(1))
+            return w * 7, f"next {w} week{'s' if w > 1 else ''}"
+
+        m = re.search(r"(\d+)\s*months?", text)
+        if m:
+            mo = int(m.group(1))
+            return mo * 30, f"next {mo} month{'s' if mo > 1 else ''}"
+
+        if any(w in text for w in ("today", "heute", "today's")):
+            return 1, "today"
+
+        if any(w in text for w in ("tomorrow", "morgen")):
+            return 2, "tomorrow"
+
+        if any(w in text for w in ("this week", "diese woche", "current week")):
+            return 7, "this week"
+
+        if any(w in text for w in ("next week", "nächste woche")):
+            return 14, "next two weeks"
+
+        if any(w in text for w in (
+            "this month", "diesen monat", "month", "monat",
+            "coming weeks", "upcoming weeks",
+        )):
+            return 30, "this month"
+
+        if any(w in text for w in ("semester", "term")):
+            return 120, "this semester"
+
+        return 7, "the next 7 days"
 
     # ------------------------------------------------------------------
     # Scrapers — TUMonline
@@ -538,25 +591,66 @@ class WatcherAgent:
         self.check_and_create_alerts()
         return "\n".join(lines)
 
-    def get_this_week(self) -> str:
-        """Return filtered upcoming deadlines in the next 7 days.
+    def get_this_week(self, user_input: str = "", context: dict | None = None) -> str:
+        """Return personalized, formatted deadlines for the requested time range.
 
-        Applies enrollment filtering so only the student's own courses are shown.
+        Parses the time range from user_input (defaults to 7 days).
+        Filters by enrolled courses from context or SQLite.
+        Flags weak subjects with a warning marker.
+
+        Args:
+            user_input: Natural language query (used to parse time range).
+            context: Optional orchestrator context with courses/grades/weak_subjects.
 
         Returns:
-            Human-readable string of upcoming deadlines.
+            Formatted markdown string of upcoming deadlines.
         """
-        courses_data = self._get_enrolled_courses()
-        enrolled_courses = courses_data.get("all_courses", [])
-        deadlines = self.db.get_upcoming_deadlines(days=7)
-        deadlines = self._filter_by_enrollment(deadlines, enrolled_courses)
+        days, time_label = self._parse_time_range(user_input)
+
+        enrolled = (
+            (context or {}).get("courses")
+            or self.db.get_profile("courses")
+            or []
+        )
+        weak = (context or {}).get("weak_subjects") or []
+
+        deadlines = self.db.get_upcoming_deadlines(days=days)
+        deadlines = self._filter_by_enrollment(deadlines, enrolled)
 
         if not deadlines:
-            return "No deadlines in the next 7 days."
+            msg = f"No deadlines found for **{time_label}**."
+            last_fetched = self.db.get_last_fetched()
+            if not last_fetched:
+                msg += (
+                    "\n\n> ⚠️ Data has not been synced yet. "
+                    "A background sync runs automatically on login."
+                )
+            return msg
 
-        lines = ["**Upcoming deadlines (next 7 days):**\n"]
-        for dl in deadlines:
-            lines.append(f"  • [{dl['deadline_date']}] {dl['title']} — {dl['course']}")
+        lines = [f"**Deadlines for {time_label}** ({len(deadlines)} found):\n"]
+        for dl in sorted(deadlines, key=lambda x: x.get("deadline_date", "")):
+            date_str = dl["deadline_date"]
+            try:
+                delta = (
+                    datetime.strptime(date_str, "%Y-%m-%d").date()
+                    - datetime.now().date()
+                ).days
+                urgency = "🔴" if delta <= 1 else "🟡" if delta <= 3 else "📅"
+            except ValueError:
+                urgency = "📅"
+
+            # Flag if this is a known weak subject
+            weak_flag = ""
+            if weak:
+                combined = (dl["title"] + " " + dl.get("course", "")).lower()
+                if any(w.lower() in combined for w in weak):
+                    weak_flag = " ⚠️ *weak subject*"
+
+            lines.append(
+                f"  {urgency} **{date_str}** — {dl['title']} "
+                f"({dl.get('course', dl.get('source', ''))}){weak_flag}"
+            )
+
         return "\n".join(lines)
 
 

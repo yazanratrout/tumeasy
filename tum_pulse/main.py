@@ -456,6 +456,7 @@ def _background_scrape() -> None:
         st.session_state.watcher_status = agent.status
         st.session_state.last_refreshed = datetime.now().strftime("%H:%M:%S")
         st.session_state.watcher_message = summary
+        _db.save_last_fetched(datetime.now().isoformat())
     except Exception as exc:
         st.session_state.watcher_message = f"Background sync failed: {exc}"
     finally:
