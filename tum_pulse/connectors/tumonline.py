@@ -186,10 +186,139 @@ class TUMonlineConnector:
             result["all_courses"] = list(result["enrolled"])
             print(f"[TUMonlineConnector] Found {len(result['enrolled'])} enrolled courses via REST API")
 
+            # Step 3: fetch grades from current-semester examinations
+            try:
+                grades_data = page.evaluate(f"""async () => {{
+                    const r = await fetch(
+                        '/tumonline/ee/rest/slc.tm.cp/student/myExaminations?$filter=termId-eq={semester_id}&$skip=0&$top=100',
+                        {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}}}
+                    );
+                    return r.ok ? await r.json() : {{}};
+                }}""")
+
+                for exam in grades_data.get("examinations", []):
+                    grade_val = (
+                        exam.get("grade", {}).get("value") or
+                        exam.get("gradeValue") or
+                        exam.get("grade_value")
+                    )
+                    course_title = (
+                        exam.get("course", {}).get("courseTitle", {}).get("value") or
+                        (exam.get("courseTitle") or {}).get("value") or
+                        exam.get("title") or ""
+                    ).strip()
+
+                    if course_title and grade_val:
+                        try:
+                            grade_float = float(str(grade_val).replace(",", "."))
+                            if 1.0 <= grade_float <= 5.0:
+                                result["grades"][course_title] = grade_float
+                        except (ValueError, TypeError):
+                            pass
+
+                print(f"[TUMonlineConnector] Found {len(result['grades'])} graded courses")
+            except Exception as exc:
+                print(f"[TUMonlineConnector] Grade fetch failed: {exc}")
+
+            # Also try the full transcript endpoint (all semesters)
+            try:
+                transcript_data = page.evaluate(f"""async () => {{
+                    const r = await fetch(
+                        '/tumonline/ee/rest/slc.tm.cp/student/myExaminations?$skip=0&$top=200',
+                        {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}}}
+                    );
+                    return r.ok ? await r.json() : {{}};
+                }}""")
+
+                for exam in transcript_data.get("examinations", []):
+                    grade_val = (
+                        exam.get("grade", {}).get("value") or
+                        exam.get("gradeValue") or
+                        exam.get("grade_value")
+                    )
+                    course_title = (
+                        exam.get("course", {}).get("courseTitle", {}).get("value") or
+                        (exam.get("courseTitle") or {}).get("value") or
+                        exam.get("title") or ""
+                    ).strip()
+
+                    if course_title and grade_val and course_title not in result["grades"]:
+                        try:
+                            grade_float = float(str(grade_val).replace(",", "."))
+                            if 1.0 <= grade_float <= 5.0:
+                                result["grades"][course_title] = grade_float
+                                if course_title not in result["all_courses"]:
+                                    result["all_courses"].append(course_title)
+                        except (ValueError, TypeError):
+                            pass
+
+                print(f"[TUMonlineConnector] Total graded courses after transcript: {len(result['grades'])}")
+            except Exception as exc:
+                print(f"[TUMonlineConnector] Transcript fetch failed: {exc}")
+
         except Exception as exc:
             print(f"[TUMonlineConnector] get_enrolled_courses error: {exc}")
 
         return result
+
+    def debug_api_responses(self, username: str, password: str) -> None:
+        """Print raw API responses to identify correct field names for grades."""
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                if not self.login(page, username, password):
+                    print("Login failed")
+                    return
+
+                page.goto(
+                    "https://campus.tum.de/tumonline/ee/ui/ca2/app/desktop/#/home?$ctx=lang=en",
+                    timeout=20_000,
+                )
+                page.wait_for_load_state("networkidle", timeout=15_000)
+                page.wait_for_timeout(1000)
+
+                token_data = page.evaluate("""async () => {
+                    const r = await fetch('/tumonline/ee/rest/auth/token/refresh', {
+                        method: 'POST',
+                        headers: {Accept: 'application/json', 'Content-Type': 'application/json'},
+                        body: '{}'
+                    });
+                    return r.ok ? await r.json() : {};
+                }""")
+                token = token_data.get("accessToken", "")
+                if not token:
+                    print("No token")
+                    return
+
+                token_js = json.dumps(token)
+
+                endpoints = [
+                    "/tumonline/ee/rest/slc.tm.cp/student/myExaminations?$top=3",
+                    "/tumonline/ee/rest/slc.tm.cp/student/myExaminations?$filter=statusId-eq=POS&$top=3",
+                    "/tumonline/ee/rest/slc.tm.cp/student/myResults?$top=3",
+                    "/tumonline/ee/rest/slc.tm.cp/student/myAchievements?$top=3",
+                    "/tumonline/ee/rest/slc.tm.cp/student/myGrades?$top=3",
+                ]
+
+                for endpoint in endpoints:
+                    result = page.evaluate(f"""async () => {{
+                        const r = await fetch('{endpoint}',
+                            {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}}}
+                        );
+                        const status = r.status;
+                        const body = r.ok ? await r.json() : await r.text();
+                        return {{status, body}};
+                    }}""")
+                    print(f"\n{'='*50}")
+                    print(f"ENDPOINT: {endpoint}")
+                    print(f"STATUS: {result.get('status')}")
+                    body = result.get("body", {})
+                    print(f"RESPONSE (first 500 chars): {json.dumps(body)[:500]}")
+            finally:
+                browser.close()
 
     def scrape_with_courses(self, username: str, password: str) -> dict:
         """Full scrape: login once, then fetch deadlines AND courses/grades.
@@ -229,11 +358,11 @@ if __name__ == "__main__":
     if not username or not password:
         print("Set TUM_USERNAME and TUM_PASSWORD in .env to test")
     else:
+        print("=== Debugging API responses for grade endpoints ===")
+        TUMonlineConnector().debug_api_responses(username, password)
+        print("\n=== Full scrape with courses and grades ===")
         result = TUMonlineConnector().scrape_with_courses(username, password)
-        print(f"Deadlines ({len(result['deadlines'])}):")
-        for dl in result["deadlines"][:5]:
-            print(f"  [{dl['deadline_date']}] {dl['title']}")
         courses = result["courses"]
-        print(f"\nEnrolled ({len(courses['enrolled'])}): {courses['enrolled'][:5]}")
+        print(f"Enrolled ({len(courses['enrolled'])}): {courses['enrolled'][:5]}")
         print(f"Grades ({len(courses['grades'])}): {dict(list(courses['grades'].items())[:5])}")
         print(f"All courses ({len(courses['all_courses'])}): {courses['all_courses'][:5]}")

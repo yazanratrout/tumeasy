@@ -113,6 +113,9 @@ class WatcherAgent:
                 self.db.save_profile("enrolled", courses_data["enrolled"])
                 if courses_data.get("grades"):
                     self.db.save_profile("grades", courses_data["grades"])
+                    print(f"[WatcherAgent] Saved {len(courses_data['grades'])} grades to profile")
+                else:
+                    print("[WatcherAgent] No grades returned from TUMonline this session")
                 print(f"[WatcherAgent] Fetched {len(courses_data['all_courses'])} courses from TUMonline")
                 return courses_data
         except Exception as exc:

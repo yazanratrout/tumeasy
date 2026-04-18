@@ -551,6 +551,24 @@ class AdvisorAgent:
 
         saved_grades = self.db.get_profile("grades")
         saved_courses = self.db.get_profile("courses") or self.db.get_profile("enrolled")
+
+        # If no profile at all, trigger a fresh course+grade fetch
+        if not saved_grades and not saved_courses:
+            print("[AdvisorAgent] No profile in SQLite — triggering TUMonline fetch...")
+            try:
+                from tum_pulse.connectors.tumonline import TUMonlineConnector
+                from tum_pulse.config import TUM_USERNAME, TUM_PASSWORD
+                fetch_result = TUMonlineConnector().scrape_with_courses(TUM_USERNAME, TUM_PASSWORD)
+                courses_data = fetch_result.get("courses", {})
+                if courses_data.get("grades"):
+                    saved_grades = courses_data["grades"]
+                    self.db.save_profile("grades", saved_grades)
+                if courses_data.get("all_courses"):
+                    saved_courses = courses_data["all_courses"]
+                    self.db.save_profile("courses", saved_courses)
+            except Exception as exc:
+                print(f"[AdvisorAgent] Fresh fetch failed: {exc}")
+
         if saved_grades:
             profile["grades"] = saved_grades
         if saved_courses:
