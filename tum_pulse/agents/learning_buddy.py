@@ -46,6 +46,14 @@ class LearningBuddyAgent:
         from bs4 import BeautifulSoup
 
         course_name_lower = course_name.lower()
+        candidates: list[tuple[float, str, str]] = []  # (score, course_id, link_text)
+
+        def _score(text: str) -> float:
+            significant_words = [w for w in course_name_lower.split() if len(w) > 3]
+            if not significant_words:
+                return 0.0
+            matches = sum(1 for w in significant_words if w in text)
+            return matches / len(significant_words)
 
         # Strategy 1: scrape /my/ dashboard for enrolled course links
         try:
@@ -60,14 +68,10 @@ class LearningBuddyAgent:
                 href = link.get("href", "")
                 text = link.get_text(strip=True).lower()
                 m = re.search(r"course/view\.php\?id=(\d+)", href)
-                if m and any(
-                    word in text
-                    for word in course_name_lower.split()
-                    if len(word) > 3
-                ):
-                    course_id = m.group(1)
-                    print(f"[LearningBuddy] Found course ID {course_id} for '{course_name}'")
-                    return course_id
+                if m and text:
+                    score = _score(text)
+                    if score >= 0.5:
+                        candidates.append((score, m.group(1), text))
         except Exception as exc:
             print(f"[LearningBuddy] Dashboard scrape failed: {exc}")
 
@@ -83,16 +87,19 @@ class LearningBuddyAgent:
                 href = link.get("href", "")
                 text = link.get_text(strip=True).lower()
                 m = re.search(r"course/view\.php\?id=(\d+)", href)
-                if m and any(
-                    word in text
-                    for word in course_name_lower.split()
-                    if len(word) > 3
-                ):
-                    course_id = m.group(1)
-                    print(f"[LearningBuddy] Found course ID {course_id} via search")
-                    return course_id
+                if m and text:
+                    score = _score(text)
+                    if score >= 0.5:
+                        candidates.append((score, m.group(1), text))
         except Exception as exc:
             print(f"[LearningBuddy] Course search failed: {exc}")
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_id, best_text = candidates[0]
+            print(f"[LearningBuddy] Best match: '{best_text[:60]}' "
+                  f"(score={best_score:.2f}) → course ID {best_id}")
+            return best_id
 
         print(f"[LearningBuddy] Could not find Moodle course ID for '{course_name}'")
         return None
@@ -172,9 +179,12 @@ class LearningBuddyAgent:
 
                         page.wait_for_timeout(2000)
 
-                        # DEBUG: print page URL, title and ALL href links to understand page structure
+                        # Debug summary
                         print(f"[LearningBuddy] Page URL after navigation: {page.url}")
                         print(f"[LearningBuddy] Page title: {page.title()}")
+                        body_preview = page.inner_text("body")[:200]
+                        if "login" in page.url.lower() or "anmelden" in body_preview.lower():
+                            print("[LearningBuddy] WARNING: May not be authenticated!")
 
                         all_hrefs = page.evaluate("""() => {
                             return Array.from(document.querySelectorAll('a[href]')).map(a => ({
@@ -182,14 +192,53 @@ class LearningBuddyAgent:
                                 text: a.textContent.trim().substring(0, 60)
                             })).filter(l => l.href.length > 10);
                         }""")
-
                         print(f"[LearningBuddy] Total links on page: {len(all_hrefs)}")
-                        print("[LearningBuddy] First 30 links:")
-                        for l in all_hrefs[:30]:
-                            print(f"  [{l['text'][:40]}] → {l['href'][:100]}")
+                        relevant = [l for l in all_hrefs if any(kw in l["href"].lower() for kw in
+                                    ["pluginfile", "mod/resource", "mod/folder", "download", "pdf"])]
+                        print(f"[LearningBuddy] Potentially relevant links: {len(relevant)}")
+                        for l in relevant[:15]:
+                            print(f"  [{l['text'][:40]}] → {l['href'][:90]}")
 
-                        body_text = page.inner_text("body")[:500]
-                        print(f"[LearningBuddy] Page body preview: {body_text[:300]}")
+                        # Check for TUM's "Download Center" — custom Moodle plugin
+                        download_center_found = False
+                        try:
+                            dc_link = page.locator(
+                                "a:has-text('Download Center'), "
+                                "a:has-text('Download-Center'), "
+                                "a[href*='downloadcenter'], "
+                                "a[href*='mod/folder']"
+                            ).first
+                            if dc_link.is_visible(timeout=3000):
+                                dc_href = dc_link.get_attribute("href")
+                                print(f"[LearningBuddy] Found Download Center: {dc_href}")
+                                page.click(
+                                    "a:has-text('Download Center'), "
+                                    "a:has-text('Download-Center'), "
+                                    "a[href*='downloadcenter'], "
+                                    "a[href*='mod/folder']",
+                                    timeout=5000,
+                                )
+                                page.wait_for_load_state("networkidle", timeout=10_000)
+                                page.wait_for_timeout(1500)
+                                download_center_found = True
+                                print(f"[LearningBuddy] Navigated to Download Center: {page.url}")
+                        except Exception as exc:
+                            print(f"[LearningBuddy] No Download Center found: {exc}")
+
+                        # Try "Expand all" / "Alles aufklappen" if no Download Center
+                        if not download_center_found:
+                            try:
+                                expand_all = page.locator(
+                                    "a:has-text('Alles aufklappen'), "
+                                    "a:has-text('Expand all'), "
+                                    "[data-action='toggleall']"
+                                ).first
+                                if expand_all.is_visible(timeout=2000):
+                                    expand_all.click(timeout=3000)
+                                    page.wait_for_timeout(2000)
+                                    print("[LearningBuddy] Expanded all sections")
+                            except Exception:
+                                pass
 
                         # Extract ALL links from the rendered page
                         all_links = page.evaluate("""() => {
@@ -211,8 +260,9 @@ class LearningBuddyAgent:
 
                             is_file = (
                                 "pluginfile.php" in href or
-                                "mod/resource" in href or
-                                "mod/folder" in href
+                                "mod/resource/view.php" in href or
+                                "mod/folder/view.php" in href or
+                                "mod/url/view.php" in href
                             )
                             if not is_file or href in seen_urls:
                                 continue
@@ -240,6 +290,27 @@ class LearningBuddyAgent:
                                 seen_urls.add(href)
 
                         print(f"[LearningBuddy] Found {len(pdf_links)} files via Playwright")
+
+                        # If still no files, try scraping all mod/resource links directly
+                        if not pdf_links:
+                            print("[LearningBuddy] No direct file links — trying mod/resource links...")
+                            resource_links = page.evaluate("""() => {
+                                return Array.from(document.querySelectorAll(
+                                    'a[href*="mod/resource"], a[href*="mod/folder"], '
+                                    + 'a[href*="pluginfile"]'
+                                )).map(a => ({
+                                    href: a.href,
+                                    text: a.textContent.trim().substring(0, 100)
+                                }));
+                            }""")
+                            print(f"[LearningBuddy] Found {len(resource_links)} resource links")
+                            for link in resource_links:
+                                href = link.get("href", "")
+                                text = link.get("text", "")
+                                if href not in seen_urls:
+                                    pdf_links.append({"url": href, "name": text})
+                                    seen_urls.add(href)
+                                    print(f"[LearningBuddy]   Resource: {text[:50]} → {href[:80]}")
 
                         def _classify(name: str) -> int:
                             n = name.lower()
