@@ -139,11 +139,19 @@ class WatcherAgent:
         if not enrolled:
             return deadlines
 
+        # Words that appear in many course names but don't identify a specific subject
+        _GENERIC_WORDS = {
+            "introduction", "advanced", "applied", "practical", "principles",
+            "fundamentals", "basics", "overview", "seminar", "lecture",
+            "course", "study", "studies", "special", "topics", "selected",
+        }
+
         keywords: set[str] = set()
         for name in enrolled:
             for word in name.split():
-                if len(word) > 3:
-                    keywords.add(word.lower())
+                w = word.lower().rstrip("0123456789")  # strip trailing digits e.g. "Analysis2"
+                if len(w) > 3 and w not in _GENERIC_WORDS:
+                    keywords.add(w)
 
         filtered: list[dict] = []
         for dl in deadlines:
