@@ -172,6 +172,25 @@ class LearningBuddyAgent:
 
                         page.wait_for_timeout(2000)
 
+                        # DEBUG: print page URL, title and ALL href links to understand page structure
+                        print(f"[LearningBuddy] Page URL after navigation: {page.url}")
+                        print(f"[LearningBuddy] Page title: {page.title()}")
+
+                        all_hrefs = page.evaluate("""() => {
+                            return Array.from(document.querySelectorAll('a[href]')).map(a => ({
+                                href: a.href,
+                                text: a.textContent.trim().substring(0, 60)
+                            })).filter(l => l.href.length > 10);
+                        }""")
+
+                        print(f"[LearningBuddy] Total links on page: {len(all_hrefs)}")
+                        print("[LearningBuddy] First 30 links:")
+                        for l in all_hrefs[:30]:
+                            print(f"  [{l['text'][:40]}] → {l['href'][:100]}")
+
+                        body_text = page.inner_text("body")[:500]
+                        print(f"[LearningBuddy] Page body preview: {body_text[:300]}")
+
                         # Extract ALL links from the rendered page
                         all_links = page.evaluate("""() => {
                             const links = [];
