@@ -434,6 +434,7 @@ class AdvisorAgent:
         self.bedrock = BedrockClient()
         self.db = SQLiteMemory()
         self.electives = get_electives(self.db, force_refresh=force_refresh_electives)
+        self.data_source = "api" if len(self.electives) > 15 else "fallback"
 
     # ------------------------------------------------------------------
     # Embedding helpers

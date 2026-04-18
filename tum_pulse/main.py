@@ -682,6 +682,42 @@ with tab_chat:
                 )
             st.markdown(response)
             st.session_state.last_agent = agent_called
+
+            # Context-aware feedback badges shown after each relevant response
+            if agent_called in ("elective_advice", "exam_plan", "deadlines"):
+                _fb_db = SQLiteMemory()
+                _fb_grades = _fb_db.get_profile("grades") or {}
+                _weak = [
+                    c for c, g in _fb_grades.items()
+                    if isinstance(g, (int, float)) and g > 2.3
+                ]
+                _urgent = _fb_db.get_upcoming_deadlines(days=3)
+
+                if agent_called in ("elective_advice", "exam_plan"):
+                    if _weak:
+                        st.info(
+                            f"📉 Weak subjects considered: "
+                            f"{', '.join(_weak[:3])}"
+                        )
+                    if _urgent:
+                        st.warning(
+                            "⚠️ Upcoming deadlines detected — "
+                            "recommendations adapted for time pressure"
+                        )
+
+                if agent_called == "elective_advice":
+                    st.success("🎯 Personalised using your grades and course history")
+                elif agent_called == "exam_plan":
+                    st.success(
+                        "🧠 Study plan adapted to your weak subjects "
+                        "and available time"
+                    )
+                elif agent_called == "deadlines":
+                    st.success(
+                        "📅 Aggregated live from TUMonline, Moodle "
+                        "and Confluence"
+                    )
+
         st.session_state.messages.append({"role": "assistant", "content": response})
         st.rerun()
 
