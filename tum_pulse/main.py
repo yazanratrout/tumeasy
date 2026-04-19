@@ -670,8 +670,25 @@ with st.sidebar:
         st.divider()
 
     if st.button("🚪 Sign out", use_container_width=True):
-        st.session_state.logged_in = False
-        st.session_state.tum_username = ""
+        # Wipe credentials from .env and os.environ
+        _CRED_KEYS = [
+            "TUM_USERNAME", "TUM_PASSWORD",
+            "ZHS_USERNAME", "ZHS_PASSWORD",
+            "CONFLUENCE_USERNAME", "CONFLUENCE_PASSWORD",
+        ]
+        for _ck in _CRED_KEYS:
+            os.environ.pop(_ck, None)
+        if _ENV_PATH.exists():
+            _env_lines = [
+                ln for ln in _ENV_PATH.read_text().splitlines()
+                if not any(ln.startswith(k) for k in _CRED_KEYS)
+            ]
+            _ENV_PATH.write_text("\n".join(_env_lines) + "\n")
+
+        # Clear all session state so chat history and flags are gone
+        for _k in list(st.session_state.keys()):
+            del st.session_state[_k]
+
         st.rerun()
 
     st.caption("Powered by Amazon Bedrock · LangGraph")
