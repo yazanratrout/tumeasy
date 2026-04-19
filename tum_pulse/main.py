@@ -95,17 +95,11 @@ html, body, [data-testid="stAppViewContainer"] {{
     box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }}
 
-/* ── Chat input (fixed at bottom) ── */
+/* ── Chat input — Streamlit positions it at the bottom natively ── */
 [data-testid="stChatInputContainer"] {{
-    position: fixed !important;
-    bottom: 0 !important;
-    left: 0 !important;
-    right: 0 !important;
-    width: 100% !important;
-    padding: 16px !important;
     background: {TUM_BG} !important;
-    box-shadow: 0 -2px 8px rgba(0,0,0,0.1) !important;
-    z-index: 1000 !important;
+    padding: 8px 0 !important;
+    border-top: 1px solid rgba(0,101,189,0.12) !important;
 }}
 
 /* ── Buttons ── */
@@ -197,15 +191,7 @@ hr {{ border-color: rgba(0,101,189,0.12); }}
     border-color: {TUM_BLUE} !important;
 }}
 
-/* ── Pin chat input to bottom ── */
-[data-testid="stChatInput"] {{
-    position: sticky;
-    bottom: 0;
-    background: {TUM_BG};
-    padding: 12px 0 4px 0;
-    z-index: 100;
-    border-top: 1px solid rgba(0,101,189,0.10);
-}}
+/* stChatInput positioning handled by Streamlit natively */
 
 /* ── Make chat messages area scrollable above input ── */
 [data-testid="stChatMessageContainer"] {{
@@ -268,15 +254,17 @@ for _k, _v in {
     "chat_learning_buddy": [],
     "chat_zhs": [],
     "active_chat": "electives",
+    "pending_chat_input": None,
+    "pending_lb_input": None,
 }.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
 # Auto-login if credentials already in env
-from tum_pulse.config import TUM_USERNAME, TUM_PASSWORD  # noqa: E402
-if TUM_USERNAME and TUM_PASSWORD and not st.session_state.logged_in:
+from tum_pulse.config import get_tum_username, get_tum_password  # noqa: E402
+if get_tum_username() and get_tum_password() and not st.session_state.logged_in:
     st.session_state.logged_in = True
-    st.session_state.tum_username = TUM_USERNAME
+    st.session_state.tum_username = get_tum_username()
 
 # ===========================================================================
 # LOGIN PAGE
@@ -851,38 +839,29 @@ with tab_chat:
             if is_quiz:
                 st.info("🎯 **Quiz mode active** — answer freely, I'll give feedback and ask the next question.")
 
+            # ── Phase 1: render history ──
             for msg in chat_msgs_lb:
                 if msg["role"] == "system_quiz":
-                    continue  # hidden context, don't display
+                    continue
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
-            # ── Chat input ──
-            placeholder = (
-                "Type your answer…" if is_quiz
-                else f"Ask about {_short_label(course_name)}, summarise, explain…"
-            )
-            typed_lb = st.chat_input(placeholder, key=f"input_lb_{tab_i}")
-            user_msg = _quick_prompt or typed_lb
-
-            if user_msg:
-                chat_msgs_lb.append({"role": "user", "content": user_msg})
-                with st.chat_message("user"):
-                    st.markdown(user_msg)
-
+            # ── Phase 2: process pending input BEFORE the input box renders ──
+            _pending_lb_key = f"pending_lb_{chat_key_lb}"
+            _pending_lb = st.session_state.get(_pending_lb_key) or _quick_prompt
+            if _pending_lb:
+                st.session_state[_pending_lb_key] = None
                 with st.chat_message("assistant"):
                     with st.spinner("🧠 Thinking…"):
                         if is_quiz:
-                            # Pass full conversation to Bedrock so it can evaluate answer + ask next
                             from tum_pulse.tools.bedrock_client import BedrockClient as _BC2
                             _bc = _BC2()
-                            # Build prompt from visible history
                             history_text = "\n".join(
                                 f"{'Student' if m['role']=='user' else 'Quiz Master'}: {m['content']}"
                                 for m in chat_msgs_lb
                                 if m["role"] in ("user", "assistant")
                             )
-                            quiz_ctx = st.session_state[chat_key_lb][0]["content"] if chat_msgs_lb and chat_msgs_lb[0]["role"] == "system_quiz" else ""
+                            quiz_ctx = chat_msgs_lb[0]["content"] if chat_msgs_lb and chat_msgs_lb[0]["role"] == "system_quiz" else ""
                             response = _bc.invoke(
                                 f"{quiz_ctx}\n\nCONVERSATION SO FAR:\n{history_text}\n\n"
                                 "Now give feedback on the last student answer and ask the next question.",
@@ -890,16 +869,27 @@ with tab_chat:
                             )
                         elif pdf_text:
                             from tum_pulse.agents.learning_buddy_v2 import SmartLearningBuddy
-                            response = SmartLearningBuddy().run_with_pdf(user_msg, pdf_text, pdf_name)
+                            response = SmartLearningBuddy().run_with_pdf(_pending_lb, pdf_text, pdf_name)
                         else:
                             from tum_pulse.agents.learning_buddy_v2 import SmartLearningBuddy
-                            enriched = user_msg if course_name.lower() in user_msg.lower() \
-                                else f"{user_msg} (course: {course_name})"
+                            enriched = _pending_lb if course_name.lower() in _pending_lb.lower() \
+                                else f"{_pending_lb} (course: {course_name})"
                             response = SmartLearningBuddy().run(enriched)
                     st.markdown(response)
-                    st.session_state.last_agent = "exam_plan"
-
+                st.session_state.last_agent = "exam_plan"
                 chat_msgs_lb.append({"role": "assistant", "content": response})
+                st.rerun()
+
+            # ── Chat input always last → stays at bottom ──
+            placeholder = (
+                "Type your answer…" if is_quiz
+                else f"Ask about {_short_label(course_name)}, summarise, explain…"
+            )
+            typed_lb = st.chat_input(placeholder, key=f"input_lb_{tab_i}")
+
+            if typed_lb:
+                chat_msgs_lb.append({"role": "user", "content": typed_lb})
+                st.session_state[_pending_lb_key] = typed_lb
                 st.rerun()
 
     # ══════════════════════════════════════════════════════════
@@ -908,34 +898,23 @@ with tab_chat:
     else:
         chat_messages = st.session_state[f"chat_{active_chat}"]
 
+        # ── Phase 1: render all history messages ──
         for msg in chat_messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        if st.session_state.last_agent:
-            label = _AGENT_LABELS.get(st.session_state.last_agent, st.session_state.last_agent)
-            st.caption(f"Last activated: **{label}**")
-
-        _placeholders = {
-            "deadlines": "Ask about your deadlines…",
-            "electives": "Ask for elective recommendations…",
-            "zhs":       "Search or book ZHS sport courses…",
-        }
-        typed = st.chat_input(_placeholders.get(active_chat, "How can I help?"))
-
-        if typed:
-            chat_messages.append({"role": "user", "content": typed})
-            with st.chat_message("user"):
-                st.markdown(typed)
-
+        # ── Phase 2: process any pending input (runs BEFORE the input box renders) ──
+        _pending = st.session_state.get("pending_chat_input")
+        if _pending:
+            st.session_state.pending_chat_input = None
             with st.chat_message("assistant"):
                 with st.spinner("Thinking…"):
                     response, agent_called = orchestrator_run(
-                        typed,
+                        _pending,
                         thread_id=student_name or st.session_state.tum_username or "default",
                     )
                 st.markdown(response)
-                st.session_state.last_agent = agent_called
+            st.session_state.last_agent = agent_called
 
             # Context-aware feedback badges
             if agent_called in ("elective_advice", "exam_plan", "deadlines"):
@@ -956,6 +935,24 @@ with tab_chat:
                     st.success("📅 Aggregated live from TUMonline, Moodle and Confluence")
 
             chat_messages.append({"role": "assistant", "content": response})
+            st.rerun()
+
+        if st.session_state.last_agent:
+            label = _AGENT_LABELS.get(st.session_state.last_agent, st.session_state.last_agent)
+            st.caption(f"Last activated: **{label}**")
+
+        # ── Chat input always last → renders at bottom ──
+        _placeholders = {
+            "deadlines": "Ask about your deadlines…",
+            "electives": "Ask for elective recommendations…",
+            "zhs":       "Search or book ZHS sport courses…",
+        }
+        typed = st.chat_input(_placeholders.get(active_chat, "How can I help?"))
+
+        if typed:
+            # Save user message to history and queue processing for next render
+            chat_messages.append({"role": "user", "content": typed})
+            st.session_state.pending_chat_input = typed
             st.rerun()
 
 # ===========================================================================
@@ -1218,11 +1215,11 @@ with tab_zhs:
 
     if do_search and sport_query:
         from tum_pulse.connectors.zhs import ZHSConnector
-        from tum_pulse.config import ZHS_USERNAME, ZHS_PASSWORD
+        from tum_pulse.config import get_zhs_username, get_zhs_password
 
         with st.spinner(f"Searching ZHS for '{sport_query}'…"):
             connector = ZHSConnector()
-            result = connector.run(ZHS_USERNAME, ZHS_PASSWORD, sport_query, register_first=False)
+            result = connector.run(get_zhs_username(), get_zhs_password(), sport_query, register_first=False)
 
         all_slots = result.get("slots", [])
 
@@ -1276,7 +1273,7 @@ with tab_zhs:
 
                     if st.button("📌 Register", key=f"book_{i}", use_container_width=False):
                         from tum_pulse.connectors.zhs import ZHSConnector
-                        from tum_pulse.config import ZHS_USERNAME, ZHS_PASSWORD
+                        from tum_pulse.config import get_zhs_username, get_zhs_password
                         from playwright.sync_api import sync_playwright
 
                         with st.spinner(f"Registering for {slot.title}…"):
@@ -1284,7 +1281,7 @@ with tab_zhs:
                                 browser = pw.chromium.launch(headless=True)
                                 page = browser.new_page()
                                 _zc = ZHSConnector()
-                                _zc.login(page, ZHS_USERNAME, ZHS_PASSWORD)
+                                _zc.login(page, get_zhs_username(), get_zhs_password())
                                 reg = _zc.register(page, slot)
                                 browser.close()
                             st.session_state.zhs_reg_result = reg

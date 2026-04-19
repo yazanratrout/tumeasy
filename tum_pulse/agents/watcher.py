@@ -15,14 +15,14 @@ from typing import Any
 import requests
 
 from tum_pulse.config import (
-    CONFLUENCE_PAT,
-    CONFLUENCE_PASSWORD,
     CONFLUENCE_SPACE,
     CONFLUENCE_URL,
-    CONFLUENCE_USERNAME,
     DB_PATH,
-    TUM_PASSWORD,
-    TUM_USERNAME,
+    get_tum_username,
+    get_tum_password,
+    get_confluence_username,
+    get_confluence_password,
+    get_confluence_pat,
 )
 from tum_pulse.memory.database import SQLiteMemory
 
@@ -114,7 +114,7 @@ class WatcherAgent:
         # --- 1. Live Playwright scrape via TUMonlineConnector ---
         try:
             from tum_pulse.connectors.tumonline import TUMonlineConnector
-            result = TUMonlineConnector().scrape_with_courses(TUM_USERNAME, TUM_PASSWORD)
+            result = TUMonlineConnector().scrape_with_courses(get_tum_username(), get_tum_password())
             courses_data = result.get("courses", {})
 
             if courses_data.get("all_courses"):
@@ -472,7 +472,7 @@ class WatcherAgent:
         try:
             from tum_pulse.connectors.tumonline import TUMonlineConnector
             print("[WatcherAgent] Trying TUMonlineConnector (Playwright) ...")
-            results = TUMonlineConnector().scrape(TUM_USERNAME, TUM_PASSWORD)
+            results = TUMonlineConnector().scrape(get_tum_username(), get_tum_password())
             if results:
                 print(f"[WatcherAgent] TUMonlineConnector: {len(results)} deadline(s)")
                 self.status["tumonline"] = "live"
@@ -500,7 +500,7 @@ class WatcherAgent:
         """
         from tum_pulse.connectors.moodle import MoodleConnector
         print("[WatcherAgent] Trying MoodleConnector (AJAX) ...")
-        results = MoodleConnector().scrape(TUM_USERNAME, TUM_PASSWORD)
+        results = MoodleConnector().scrape(get_tum_username(), get_tum_password())
         print(f"[WatcherAgent] MoodleConnector: {len(results)} deadline(s)")
         return results
 
@@ -554,7 +554,7 @@ class WatcherAgent:
             from atlassian import Confluence
             from tum_pulse.connectors.tumonline import parse_date as _parse_date
 
-            if not CONFLUENCE_PAT:
+            if not get_confluence_pat():
                 # collab.dvb.bayern has basic auth disabled; PAT is required.
                 # Generate one at: https://collab.dvb.bayern/plugins/personalaccesstokens/usertokens.action
                 # Then add CONFLUENCE_PAT=<token> to your .env file.
@@ -564,7 +564,7 @@ class WatcherAgent:
 
             confluence = Confluence(
                 url=CONFLUENCE_URL,
-                token=CONFLUENCE_PAT,
+                token=get_confluence_pat(),
                 timeout=20,
             )
             space_filter = f"AND space = '{CONFLUENCE_SPACE}'" if CONFLUENCE_SPACE else ""

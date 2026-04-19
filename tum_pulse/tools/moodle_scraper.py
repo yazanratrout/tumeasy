@@ -9,7 +9,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from tum_pulse.config import DATA_DIR, MOODLE_BASE_URL, TUM_PASSWORD, TUM_USERNAME
+from tum_pulse.config import DATA_DIR, MOODLE_BASE_URL, get_tum_username, get_tum_password
 
 
 class MoodleScraper:
@@ -18,8 +18,8 @@ class MoodleScraper:
     def __init__(
         self,
         base_url: str = MOODLE_BASE_URL,
-        username: str = TUM_USERNAME,
-        password: str = TUM_PASSWORD,
+        username: str = "",
+        password: str = "",
     ) -> None:
         """Store credentials and initialise a requests session.
 
@@ -29,8 +29,8 @@ class MoodleScraper:
             password: TUM / Moodle password.
         """
         self.base_url = base_url.rstrip("/")
-        self.username = username
-        self.password = password
+        self.username = username or get_tum_username()
+        self.password = password or get_tum_password()
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "TUMPulse/1.0"})
         self._logged_in = False

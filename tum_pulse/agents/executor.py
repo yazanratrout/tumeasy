@@ -4,7 +4,7 @@ import os
 import re
 from pathlib import Path
 
-from tum_pulse.config import DATA_DIR, ZHS_PASSWORD, ZHS_URL, ZHS_USERNAME
+from tum_pulse.config import DATA_DIR, ZHS_URL, get_zhs_username, get_zhs_password
 from tum_pulse.connectors.zhs import ZHSConnector, SportSlot
 
 # Apply WSL2 Playwright lib path fix
@@ -22,8 +22,8 @@ class ExecutorAgent:
 
     def __init__(self) -> None:
         self.connector = ZHSConnector()
-        self.username = ZHS_USERNAME
-        self.password = ZHS_PASSWORD
+        self.username = get_zhs_username()
+        self.password = get_zhs_password()
         self.screenshot_path = str(Path(DATA_DIR) / "zhs_screenshot.png")
 
     def search_sports(self, query: str) -> list[SportSlot]:

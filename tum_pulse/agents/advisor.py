@@ -683,8 +683,8 @@ class AdvisorAgent:
             print("[AdvisorAgent] No profile in SQLite — triggering TUMonline fetch...")
             try:
                 from tum_pulse.connectors.tumonline import TUMonlineConnector
-                from tum_pulse.config import TUM_USERNAME, TUM_PASSWORD
-                fetch_result = TUMonlineConnector().scrape_with_courses(TUM_USERNAME, TUM_PASSWORD)
+                from tum_pulse.config import get_tum_username, get_tum_password
+                fetch_result = TUMonlineConnector().scrape_with_courses(get_tum_username(), get_tum_password())
                 courses_data = fetch_result.get("courses", {})
                 if courses_data.get("grades"):
                     saved_grades = courses_data["grades"]
