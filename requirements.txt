@@ -16,3 +16,4 @@ aiohttp
 python-dateutil
 pydantic
 atlassian-python-api
+reportlab

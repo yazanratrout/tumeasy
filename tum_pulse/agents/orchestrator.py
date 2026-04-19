@@ -51,11 +51,37 @@ _INTENT_KEYWORDS = {
     },
     "zhs_registration": {
         "keywords": [
-            "register", "registration", "zhs", "sport", "course",
-            "activity", "sign up", "enroll", "join", "class",
-            "badminton", "tennis", "yoga", "gym", "swimming",
+            "zhs", "sport", "activity",
+            "badminton", "tennis", "yoga", "gym", "swimming", "schwimmen",
+            "bouldern", "climbing", "pilates", "volleyball", "basketball",
         ],
-        "priority": 3,
+        "priority": 4,   # ZHS keywords are specific — high priority
+    },
+    "course_registration": {
+        "keywords": [
+            "register", "enroll", "sign up for",
+            "anmelden", "lv anmeldung", "course registration",
+            "register for lecture", "register for seminar", "register for lab",
+            "enroll in course", "book course", "add course",
+        ],
+        "priority": 4,
+    },
+    "course_deregistration": {
+        "keywords": [
+            "drop course", "deregister", "unenroll", "abmelden",
+            "withdraw from", "cancel course", "leave course",
+            "drop lecture", "drop seminar", "remove course",
+        ],
+        "priority": 5,   # higher than course_registration so "deregister" beats "register"
+    },
+    "forum_post": {
+        "keywords": [
+            "post in forum", "write in forum", "forum post",
+            "post to forum", "send to forum", "moodle forum",
+            "write to class", "announce in", "discussion post",
+            "study group post", "forum message",
+        ],
+        "priority": 4,
     },
     "elective_advice": {
         "keywords": [
@@ -220,13 +246,65 @@ def watcher_node(state: OrchestratorState) -> OrchestratorState:
 
 
 def executor_node(state: OrchestratorState) -> OrchestratorState:
-    """Delegate to ExecutorAgent for ZHS registration tasks.
-    
-    Passes context for enrollment info and deadline context.
-    """
+    """Delegate to ExecutorAgent for ZHS, course registration, or forum tasks."""
     agent = ExecutorAgent()
     response = agent.run(state["user_input"], context=state.get("context", {}))
     return {**state, "response": response}
+
+
+def course_reg_node(state: OrchestratorState) -> OrchestratorState:
+    """Delegate to ExecutorAgent for TUMonline academic course registration."""
+    agent = ExecutorAgent()
+    response = agent.register_academic_course(
+        _extract_course_name(state["user_input"])
+    )
+    return {**state, "response": response}
+
+
+def course_dereg_node(state: OrchestratorState) -> OrchestratorState:
+    """Delegate to ExecutorAgent for TUMonline course deregistration."""
+    agent = ExecutorAgent()
+    response = agent.deregister_academic_course(
+        _extract_course_name(state["user_input"])
+    )
+    return {**state, "response": response}
+
+
+def forum_post_node(state: OrchestratorState) -> OrchestratorState:
+    """Delegate to ExecutorAgent for Moodle forum posting."""
+    import re as _re
+    agent = ExecutorAgent()
+    task  = state["user_input"]
+    # Parse: course name + message
+    msg_match = _re.search(r'(?:post|write|say|message)[:\s]+(.+)', task, _re.IGNORECASE)
+    message   = msg_match.group(1).strip() if msg_match else task
+    subj_match = _re.search(r'(?:subject|title)[:\s]+["\']?([^"\']+)["\']?', task, _re.IGNORECASE)
+    subject    = subj_match.group(1).strip() if subj_match else ""
+    # Guess course from context or task
+    context_courses = state.get("context", {}).get("courses", [])
+    course = context_courses[0] if context_courses else "General"
+    for kw in ("for ", "in ", "to "):
+        idx = task.lower().find(kw)
+        if idx != -1:
+            candidate = task[idx + len(kw):].split(":")[0].strip(".,")
+            if candidate:
+                course = candidate
+                break
+    response = agent.post_forum(course, message, subject)
+    return {**state, "response": response}
+
+
+def _extract_course_name(text: str) -> str:
+    """Extract course name from a registration/deregistration sentence."""
+    import re as _re
+    m = _re.search(r'["\']([^"\']+)["\']', text)
+    if m:
+        return m.group(1).strip()
+    for marker in ["for ", "in ", "from ", "drop ", "anmelden ", "abmelden ", "enroll in ", "register for "]:
+        idx = text.lower().find(marker)
+        if idx != -1:
+            return text[idx + len(marker):].strip(".,!?").split("\n")[0]
+    return text.strip()
 
 
 def advisor_node(state: OrchestratorState) -> OrchestratorState:
@@ -285,11 +363,14 @@ def general_node(state: OrchestratorState) -> OrchestratorState:
 def route_by_intent(state: OrchestratorState) -> str:
     """Return the next node name based on the classified intent."""
     mapping = {
-        "deadlines": "watcher",
-        "zhs_registration": "executor",
-        "elective_advice": "advisor",
-        "exam_plan": "learning_buddy",
-        "general": "general",
+        "deadlines":            "watcher",
+        "zhs_registration":     "executor",
+        "course_registration":  "course_reg",
+        "course_deregistration": "course_dereg",
+        "forum_post":           "forum_post",
+        "elective_advice":      "advisor",
+        "exam_plan":            "learning_buddy",
+        "general":              "general",
     }
     return mapping.get(state.get("agent_called", "general"), "general")
 
@@ -302,12 +383,15 @@ def build_graph() -> StateGraph:
     """Build and compile the LangGraph orchestrator."""
     graph = StateGraph(OrchestratorState)
 
-    graph.add_node("router", router_node)
-    graph.add_node("watcher", watcher_node)
-    graph.add_node("executor", executor_node)
-    graph.add_node("advisor", advisor_node)
+    graph.add_node("router",       router_node)
+    graph.add_node("watcher",      watcher_node)
+    graph.add_node("executor",     executor_node)
+    graph.add_node("course_reg",   course_reg_node)
+    graph.add_node("course_dereg", course_dereg_node)
+    graph.add_node("forum_post",   forum_post_node)
+    graph.add_node("advisor",      advisor_node)
     graph.add_node("learning_buddy", learning_buddy_node)
-    graph.add_node("general", general_node)
+    graph.add_node("general",      general_node)
 
     graph.set_entry_point("router")
 
@@ -315,15 +399,19 @@ def build_graph() -> StateGraph:
         "router",
         route_by_intent,
         {
-            "watcher": "watcher",
-            "executor": "executor",
-            "advisor": "advisor",
+            "watcher":      "watcher",
+            "executor":     "executor",
+            "course_reg":   "course_reg",
+            "course_dereg": "course_dereg",
+            "forum_post":   "forum_post",
+            "advisor":      "advisor",
             "learning_buddy": "learning_buddy",
-            "general": "general",
+            "general":      "general",
         },
     )
 
-    for node in ("watcher", "executor", "advisor", "learning_buddy", "general"):
+    for node in ("watcher", "executor", "course_reg", "course_dereg", "forum_post",
+                 "advisor", "learning_buddy", "general"):
         graph.add_edge(node, END)
 
     checkpointer = MemorySaver()

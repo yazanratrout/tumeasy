@@ -86,6 +86,19 @@ Features:
 
 ---
 
+### 📄 CV Builder
+Generates a professional, themed, downloadable PDF CV directly from the app — no external tools required.
+
+Features:
+- guided multi-step form (personal info, education, work experience, skills, languages, projects)
+- **auto-fill from TUM profile** — email, education, and skills pre-populated from your enrolled courses and grades
+- **major-based templates** — direction auto-detected from your courses (ML, Software, Mathematics, Electrical, Systems); each has a distinct colour scheme and section ordering optimised for that field
+- **skill inference** — enrolled courses mapped to relevant technical skills (e.g. Machine Learning → Python, PyTorch, Scikit-learn)
+- **send to company** — pick a Munich company from your career direction, enter the HR email, and the app sends your CV as a PDF attachment via SMTP using your TUM credentials
+- generated locally with `reportlab` — no cloud upload, no third-party service
+
+---
+
 ### 💬 Conversational Interface
 A single chat interface powered by a multi-agent system.
 
@@ -94,6 +107,7 @@ Agents:
 - **Advisor** → electives and career direction
 - **Learning Buddy** → studying and course materials
 - **Executor** → actions such as ZHS interaction
+- **CV Builder** → PDF CV generation from user-provided profile data
 
 ---
 
@@ -136,6 +150,8 @@ Context used for routing includes:
 - **Requests** → TUM NAT API integration
 - **Playwright** → browser automation for login-based or dynamic pages
 - **PyMuPDF** → PDF parsing for study materials
+- **ReportLab** → PDF generation for the CV Builder
+- **smtplib** → SMTP email sending for CV delivery (STARTTLS, uses TUM credentials)
 
 ### Performance / Caching
 - **SQLiteMemory** → structured persistence
@@ -150,6 +166,7 @@ Context used for routing includes:
 tum_pulse/
 ├── agents/
 │   ├── advisor.py              # Elective recommendation and career guidance
+│   ├── cv_maker.py             # PDF CV generation (reportlab)
 │   ├── executor.py             # ZHS and action execution
 │   ├── learning_buddy_v2.py    # Smart study assistant
 │   ├── orchestrator.py         # LangGraph routing logic

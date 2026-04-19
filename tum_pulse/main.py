@@ -256,6 +256,10 @@ for _k, _v in {
     "active_chat": "electives",
     "pending_chat_input": None,
     "pending_lb_input": None,
+    # CV Builder
+    "cv_exp_count": 1,
+    "cv_proj_count": 1,
+    "cv_lang_count": 1,
 }.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -697,8 +701,8 @@ with st.sidebar:
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_chat, tab_deadlines, tab_zhs, tab_about = st.tabs(
-    ["💬 Chat", "📅 Deadlines", "🏃 ZHS Sports", "ℹ️ About"]
+tab_chat, tab_deadlines, tab_zhs, tab_cv, tab_about = st.tabs(
+    ["💬 Chat", "📅 Deadlines", "🏃 ZHS Sports", "📄 CV Builder", "ℹ️ About"]
 )
 
 # ===========================================================================
@@ -706,13 +710,16 @@ tab_chat, tab_deadlines, tab_zhs, tab_about = st.tabs(
 # ===========================================================================
 
 _AGENT_LABELS: dict[str, str] = {
-    "deadlines":        "📅 Watcher Agent",
-    "zhs_registration": "🏃 Executor Agent",
-    "elective_advice":  "📚 Advisor Agent",
-    "exam_plan":        "🧠 Learning Buddy",
-    "general":          "💬 General Assistant",
-    "error":            "⚠️ Error",
-    "":                 "",
+    "deadlines":             "📅 Watcher Agent",
+    "zhs_registration":      "🏃 Executor Agent",
+    "course_registration":   "📋 Course Registration",
+    "course_deregistration": "📋 Course Deregistration",
+    "forum_post":            "💬 Forum Post",
+    "elective_advice":       "📚 Advisor Agent",
+    "exam_plan":             "🧠 Learning Buddy",
+    "general":               "💬 General Assistant",
+    "error":                 "⚠️ Error",
+    "":                      "",
 }
 
 with tab_chat:
@@ -1324,10 +1331,295 @@ with tab_zhs:
     """, unsafe_allow_html=True)
 
 # ===========================================================================
-# TAB 4 — About
+# TAB 4 — CV Builder
 # ===========================================================================
 
-with tab_about:
+with tab_cv:
+    from tum_pulse.agents.cv_maker import (  # noqa: E402
+        DIRECTION_THEMES,
+        CVData, Education, WorkExperience, Project,
+        detect_direction, suggest_skills,
+        generate_pdf, send_cv_email,
+    )
+    from tum_pulse.agents.advisor import CAREER_PATHS  # noqa: E402
+    from tum_pulse.config import TUM_PASSWORD  # noqa: E402
+
+    st.markdown(
+        f"<h2 style='color:{TUM_DARK_BLUE};margin-bottom:4px'>📄 CV Builder</h2>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Your TUM profile is used to auto-fill and tailor your CV template. Edit freely, then download or send.")
+
+    # ── Load TUM profile data ────────────────────────────────────────────────
+    _cv_courses = _db.get_profile("courses") or []
+    _cv_grades  = _db.get_profile("grades")  or {}
+    _cv_tum_user = st.session_state.get("tum_username", "")
+    _cv_has_profile = bool(_cv_courses or _cv_grades)
+
+    # Auto-detect direction from enrolled courses
+    _auto_direction = detect_direction(_cv_courses, _cv_grades) if _cv_has_profile else "ml"
+    _suggested_skills = suggest_skills(_cv_courses) if _cv_has_profile else []
+
+    # ── 0. Template selector ─────────────────────────────────────────────────
+    st.markdown(f"<h4 style='color:{TUM_BLUE};margin-top:12px'>① CV Template</h4>", unsafe_allow_html=True)
+    _dir_options = {k: v["label"] for k, v in DIRECTION_THEMES.items()}
+    _dir_keys = list(_dir_options.keys())
+    _auto_idx = _dir_keys.index(_auto_direction)
+
+    _tc1, _tc2 = st.columns([3, 2])
+    with _tc1:
+        _chosen_direction = st.selectbox(
+            "Choose template based on your major / career direction",
+            options=_dir_keys,
+            format_func=lambda k: _dir_options[k],
+            index=_auto_idx,
+            key="cv_direction",
+        )
+    with _tc2:
+        if _cv_has_profile:
+            st.markdown(
+                f"<div class='tum-card' style='margin-top:28px;padding:10px 14px'>"
+                f"🎯 Auto-detected: <b>{_dir_options[_auto_direction]}</b><br>"
+                f"<span style='color:#888;font-size:0.82rem'>based on {len(_cv_courses)} enrolled courses</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("Sync your TUM profile first for auto-detection.")
+    st.divider()
+
+    # ── 1. Personal Info ─────────────────────────────────────────────────────
+    st.markdown(f"<h4 style='color:{TUM_BLUE}'>② Personal Information</h4>", unsafe_allow_html=True)
+    _auto_email = f"{_cv_tum_user}@tum.de" if _cv_tum_user else ""
+
+    pi_col1, pi_col2 = st.columns(2)
+    with pi_col1:
+        cv_name     = st.text_input("Full Name *",         placeholder="Ada Lovelace",         key="cv_name")
+        cv_email    = st.text_input("Email *",             value=_auto_email,                  key="cv_email")
+        cv_phone    = st.text_input("Phone",               placeholder="+49 123 456789",       key="cv_phone")
+        cv_location = st.text_input("Location",            placeholder="Munich, Germany",      key="cv_location")
+    with pi_col2:
+        cv_linkedin = st.text_input("LinkedIn URL",        placeholder="linkedin.com/in/ada",  key="cv_linkedin")
+        cv_github   = st.text_input("GitHub URL",          placeholder="github.com/ada",       key="cv_github")
+        cv_website  = st.text_input("Website / Portfolio", placeholder="ada.dev",              key="cv_website")
+    cv_summary = st.text_area(
+        "Profile Summary",
+        placeholder="2–3 sentences: who you are, what you specialise in, what you bring.",
+        height=90,
+        key="cv_summary",
+    )
+    st.divider()
+
+    # ── 2. Education ─────────────────────────────────────────────────────────
+    st.markdown(f"<h4 style='color:{TUM_BLUE}'>③ Education</h4>", unsafe_allow_html=True)
+    edu_entries: list[Education] = []
+    _edu_labels = ["TUM / Primary Degree", "Previous Degree / Exchange", "Additional Education"]
+    for _ei in range(3):
+        with st.expander(f"🎓 {_edu_labels[_ei]}", expanded=(_ei == 0)):
+            _ec1, _ec2 = st.columns(2)
+            with _ec1:
+                _def_inst = "Technical University of Munich (TUM)" if _ei == 0 and _cv_has_profile else ""
+                _inst = st.text_input("Institution", value=_def_inst, placeholder="University / School", key=f"cv_edu_inst_{_ei}")
+                _deg  = st.text_input("Degree / Programme", placeholder="B.Sc. Computer Science", key=f"cv_edu_deg_{_ei}")
+            with _ec2:
+                _period = st.text_input("Period", placeholder="Oct 2022 – Present", key=f"cv_edu_period_{_ei}")
+                _grade  = st.text_input("Grade / GPA", placeholder="1.8 (German) / 3.8 GPA", key=f"cv_edu_grade_{_ei}")
+            _notes = st.text_input("Notes (thesis, awards…)", placeholder="Thesis: ML-based elective recommender", key=f"cv_edu_notes_{_ei}")
+        if _inst or _deg:
+            edu_entries.append(Education(institution=_inst, degree=_deg, period=_period, grade=_grade, notes=_notes))
+    st.divider()
+
+    # ── 3. Work Experience ───────────────────────────────────────────────────
+    st.markdown(f"<h4 style='color:{TUM_BLUE}'>④ Work Experience</h4>", unsafe_allow_html=True)
+    exp_entries: list[WorkExperience] = []
+    for _xi in range(st.session_state.cv_exp_count):
+        with st.expander(f"💼 Experience #{_xi + 1}", expanded=(_xi == 0)):
+            _xc1, _xc2 = st.columns(2)
+            with _xc1:
+                _x_role    = st.text_input("Job Title",  placeholder="Software Engineer Intern", key=f"cv_exp_role_{_xi}")
+                _x_company = st.text_input("Company",    placeholder="Celonis GmbH",             key=f"cv_exp_co_{_xi}")
+            with _xc2:
+                _x_period  = st.text_input("Period",     placeholder="Jun 2024 – Sep 2024",      key=f"cv_exp_period_{_xi}")
+                _x_loc     = st.text_input("Location",   placeholder="Munich, Germany",          key=f"cv_exp_loc_{_xi}")
+            _x_bullets_raw = st.text_area(
+                "Key achievements (one per line)",
+                placeholder="Built REST API reducing latency by 40%\nMentored 2 junior engineers",
+                height=90, key=f"cv_exp_bullets_{_xi}",
+            )
+        if _x_role or _x_company:
+            _bullets = [b.lstrip("•- ") for b in _x_bullets_raw.splitlines() if b.strip()]
+            exp_entries.append(WorkExperience(role=_x_role, company=_x_company, period=_x_period, location=_x_loc, bullets=_bullets))
+    if st.button("➕ Add Experience", key="cv_add_exp"):
+        st.session_state.cv_exp_count += 1
+        st.rerun()
+    st.divider()
+
+    # ── 4. Skills & Languages ────────────────────────────────────────────────
+    st.markdown(f"<h4 style='color:{TUM_BLUE}'>⑤ Skills &amp; Languages</h4>", unsafe_allow_html=True)
+    if _suggested_skills and "cv_skills_seeded" not in st.session_state:
+        st.info(f"💡 Skills auto-suggested from your {len(_cv_courses)} TUM courses — edit as needed.")
+        st.session_state["cv_skills_seeded"] = True
+
+    sk_col, lg_col = st.columns(2)
+    with sk_col:
+        _skills_default = ", ".join(_suggested_skills) if _suggested_skills else ""
+        cv_skills_raw = st.text_area(
+            "Technical Skills (comma-separated)",
+            value=_skills_default,
+            placeholder="Python, PyTorch, AWS, Docker, SQL, React",
+            height=110, key="cv_skills",
+        )
+    with lg_col:
+        lang_entries: list[tuple[str, str]] = []
+        for _li in range(st.session_state.cv_lang_count):
+            _lc1, _lc2 = st.columns([3, 2])
+            with _lc1:
+                _lang = st.text_input("Language", placeholder="German", key=f"cv_lang_name_{_li}",
+                                      label_visibility="visible" if _li == 0 else "collapsed")
+            with _lc2:
+                _lvl = st.selectbox("Level", ["Native", "C2", "C1", "B2", "B1", "A2", "A1"],
+                                    key=f"cv_lang_lvl_{_li}",
+                                    label_visibility="visible" if _li == 0 else "collapsed")
+            if _lang:
+                lang_entries.append((_lang, _lvl))
+        if st.button("➕ Add Language", key="cv_add_lang"):
+            st.session_state.cv_lang_count += 1
+            st.rerun()
+    st.divider()
+
+    # ── 5. Projects ──────────────────────────────────────────────────────────
+    st.markdown(f"<h4 style='color:{TUM_BLUE}'>⑥ Projects</h4>", unsafe_allow_html=True)
+    proj_entries: list[Project] = []
+    for _pi in range(st.session_state.cv_proj_count):
+        with st.expander(f"🚀 Project #{_pi + 1}", expanded=(_pi == 0)):
+            _pc1, _pc2 = st.columns(2)
+            with _pc1:
+                _p_name = st.text_input("Project Name", placeholder="TUM Easy Campus Co-Pilot", key=f"cv_proj_name_{_pi}")
+                _p_tech = st.text_input("Technologies",  placeholder="Python, LangGraph, AWS",   key=f"cv_proj_tech_{_pi}")
+            with _pc2:
+                _p_link = st.text_input("Link (optional)", placeholder="github.com/user/repo",  key=f"cv_proj_link_{_pi}")
+            _p_desc = st.text_area("Description", placeholder="What it does and its impact.", height=70, key=f"cv_proj_desc_{_pi}")
+        if _p_name:
+            proj_entries.append(Project(name=_p_name, description=_p_desc, technologies=_p_tech, link=_p_link))
+    if st.button("➕ Add Project", key="cv_add_proj"):
+        st.session_state.cv_proj_count += 1
+        st.rerun()
+    st.divider()
+
+    # ── 6. Generate & Download ───────────────────────────────────────────────
+    st.markdown(f"<h4 style='color:{TUM_BLUE}'>⑦ Generate &amp; Download</h4>", unsafe_allow_html=True)
+    if st.button("⚙️ Build CV PDF", type="primary", use_container_width=True, key="cv_generate"):
+        if not st.session_state.get("cv_name") or not st.session_state.get("cv_email"):
+            st.error("Please fill in at least your Full Name and Email.")
+        else:
+            _cv_skills_list = [s.strip() for s in cv_skills_raw.split(",") if s.strip()]
+            _cv_data = CVData(
+                name=st.session_state.cv_name,
+                email=st.session_state.cv_email,
+                phone=st.session_state.get("cv_phone", ""),
+                location=st.session_state.get("cv_location", ""),
+                linkedin=st.session_state.get("cv_linkedin", ""),
+                github=st.session_state.get("cv_github", ""),
+                website=st.session_state.get("cv_website", ""),
+                summary=st.session_state.get("cv_summary", ""),
+                direction=st.session_state.get("cv_direction", _auto_direction),
+                education=edu_entries,
+                experience=exp_entries,
+                skills=_cv_skills_list,
+                languages=lang_entries,
+                projects=proj_entries,
+            )
+            with st.spinner("Generating your PDF…"):
+                _pdf = generate_pdf(_cv_data)
+            st.session_state["cv_pdf_bytes"] = _pdf
+            st.success("✅ CV ready!")
+
+    if st.session_state.get("cv_pdf_bytes"):
+        _cv_fname = f"{(st.session_state.get('cv_name') or 'cv').replace(' ', '_')}_CV.pdf"
+        st.download_button(
+            label="📥 Download PDF CV",
+            data=st.session_state["cv_pdf_bytes"],
+            file_name=_cv_fname,
+            mime="application/pdf",
+            use_container_width=True,
+            type="primary",
+        )
+    st.divider()
+
+    # ── 7. Send to Company ───────────────────────────────────────────────────
+    st.markdown(f"<h4 style='color:{TUM_BLUE}'>⑧ Send to Company</h4>", unsafe_allow_html=True)
+    st.caption("Pick a Munich company from your career direction and send your CV directly via email.")
+
+    _send_direction = st.session_state.get("cv_direction", _auto_direction)
+    _dir_companies  = CAREER_PATHS.get(_send_direction, {}).get("companies", [])
+    _dir_roles      = CAREER_PATHS.get(_send_direction, {}).get("roles", [])
+
+    if not _dir_companies:
+        st.info("Select a template direction above to load matching Munich companies.")
+    else:
+        _sc1, _sc2 = st.columns(2)
+        with _sc1:
+            _company_names = [c[0] for c in _dir_companies]
+            _selected_co_name = st.selectbox("Company", _company_names, key="cv_send_company")
+            _selected_co_url  = next((url for name, url in _dir_companies if name == _selected_co_name), "")
+            if _selected_co_url:
+                st.markdown(f"[🔗 View careers page]({_selected_co_url})", unsafe_allow_html=False)
+        with _sc2:
+            _hr_email = st.text_input("HR / Recruiter Email *", placeholder="recruiting@company.com", key="cv_hr_email")
+            _role_hint = st.text_input("Role you're applying for", value=_dir_roles[0] if _dir_roles else "", key="cv_apply_role")
+
+        _cover = st.text_area(
+            "Cover message (email body)",
+            value=(
+                f"Dear Hiring Team at {_selected_co_name},\n\n"
+                f"I am a student at the Technical University of Munich interested in the {_role_hint} position. "
+                f"Please find my CV attached.\n\n"
+                f"Best regards,\n{st.session_state.get('cv_name', '')}"
+            ),
+            height=160,
+            key="cv_cover_text",
+        )
+
+        _smtp_col1, _smtp_col2 = st.columns(2)
+        with _smtp_col1:
+            _smtp_host = st.text_input("SMTP server", value="smtp.office365.com", key="cv_smtp_host",
+                                       help="TUM email uses smtp.office365.com — or use smtp.gmail.com")
+        with _smtp_col2:
+            _smtp_port = st.number_input("SMTP port", value=587, key="cv_smtp_port")
+
+        if st.button("📧 Send CV to Company", type="primary", use_container_width=True, key="cv_send_btn"):
+            if not st.session_state.get("cv_pdf_bytes"):
+                st.error("Generate and download your CV first (step ⑦) before sending.")
+            elif not _hr_email:
+                st.error("Enter the HR email address.")
+            elif not st.session_state.get("cv_email"):
+                st.error("Fill in your email in Personal Information.")
+            elif not TUM_PASSWORD:
+                st.error("TUM password not found. Sign in with 'Remember credentials' enabled.")
+            else:
+                with st.spinner(f"Sending to {_selected_co_name}…"):
+                    try:
+                        send_cv_email(
+                            smtp_host=_smtp_host,
+                            smtp_port=int(_smtp_port),
+                            sender_email=st.session_state.cv_email,
+                            sender_password=TUM_PASSWORD,
+                            recipient_email=_hr_email,
+                            recipient_name=f"Hiring Team at {_selected_co_name}",
+                            applicant_name=st.session_state.get("cv_name", ""),
+                            cover_text=_cover,
+                            pdf_bytes=st.session_state["cv_pdf_bytes"],
+                            pdf_filename=f"{(st.session_state.get('cv_name') or 'cv').replace(' ', '_')}_CV.pdf",
+                        )
+                        st.success(f"✅ CV sent to {_selected_co_name} ({_hr_email})!")
+                    except Exception as _send_err:
+                        st.error(f"Failed to send: {_send_err}")
+
+# ===========================================================================
+# TAB 5 — About
+# ===========================================================================
+
+with tab_about:  # noqa: SIM117
     st.markdown(f"<h2 style='color:{TUM_DARK_BLUE}'>About TUM Easy 🎓</h2>", unsafe_allow_html=True)
 
     col_left, col_right = st.columns(2)
@@ -1343,6 +1635,7 @@ with tab_about:
             🏃 <b>Executor</b> — automates ZHS sport registration via Playwright<br>
             📚 <b>Advisor</b> — recommends electives via Titan Embeddings<br>
             🧠 <b>Learning Buddy</b> — personalised exam prep plans<br>
+            📄 <b>CV Builder</b> — generates a downloadable PDF CV from your profile<br>
             💬 <b>General</b> — answers any TUM-related question
         </div>
         """, unsafe_allow_html=True)
