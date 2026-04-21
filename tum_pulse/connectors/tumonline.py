@@ -426,6 +426,281 @@ class TUMonlineConnector:
                     print(f"  [{r['method']}] {r['url']}")
                 browser.close()
 
+    # -------------------------------------------------------------------------
+    # Course registration / deregistration (write actions)
+    # -------------------------------------------------------------------------
+
+    def _get_bearer_token(self, page) -> str:
+        """Navigate SPA and return a fresh Bearer token."""
+        page.goto(
+            "https://campus.tum.de/tumonline/ee/ui/ca2/app/desktop/#/home?$ctx=lang=en",
+            timeout=20_000,
+        )
+        page.wait_for_load_state("networkidle", timeout=15_000)
+        page.wait_for_timeout(1000)
+        token_data = page.evaluate("""async () => {
+            const r = await fetch('/tumonline/ee/rest/auth/token/refresh', {
+                method: 'POST',
+                headers: {Accept: 'application/json', 'Content-Type': 'application/json'},
+                body: '{}'
+            });
+            return r.ok ? await r.json() : {};
+        }""")
+        return token_data.get("accessToken", "")
+
+    def search_registrable_courses(self, page, query: str) -> list[dict]:
+        """Search for courses available for registration by name or keyword.
+
+        Uses the CAMPUSonline REST API to find courses in the current semester
+        that match the query and returns their IDs + titles.
+        """
+        token = self._get_bearer_token(page)
+        if not token:
+            return []
+
+        token_js = json.dumps(token)
+        import urllib.parse
+        encoded_query = urllib.parse.quote(query)
+
+        # Try the course offering search endpoint
+        results = page.evaluate(f"""async () => {{
+            const r = await fetch(
+                '/tumonline/ee/rest/slc.tm.cp/student/courseOfferingSearch'
+                + '?search={encoded_query}&$top=20&$ctx=lang=en',
+                {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}}}
+            );
+            if (!r.ok) return {{}};
+            return await r.json();
+        }}""")
+
+        courses = []
+        for item in results.get("resource", []):
+            c = item.get("content", {}).get("courseDto", {}) or item.get("content", {})
+            title_obj = c.get("courseTitle", {}) or c.get("title", {})
+            title = (
+                title_obj.get("value", "") if isinstance(title_obj, dict) else str(title_obj)
+            )
+            course_id = c.get("courseId") or c.get("id") or item.get("id")
+            if title:
+                courses.append({"id": course_id, "title": title, "raw": c})
+
+        return courses
+
+    def _navigate_to_registration_page(self, page) -> bool:
+        """Navigate the SPA to the LV-Anmeldung (course registration) section."""
+        spa_base = "https://campus.tum.de/tumonline/ee/ui/ca2/app/desktop/"
+        candidates = [
+            "#/courseRegistration?$ctx=lang=en",
+            "#/lv-anmeldung?$ctx=lang=en",
+            "#/enrollment?$ctx=lang=en",
+            "#/myCourses?$ctx=lang=en",
+        ]
+        for route in candidates:
+            try:
+                page.goto(f"{spa_base}{route}", timeout=8_000)
+                page.wait_for_load_state("networkidle", timeout=6_000)
+                if "campus.tum.de" in page.url:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def register_course(self, page, course_name: str) -> dict:
+        """Attempt to register for an academic course on TUMonline.
+
+        Strategy:
+        1. Search for the course via REST API to get its ID.
+        2. Try a REST POST to the registration endpoint.
+        3. Fallback: navigate the SPA UI and click the Anmelden button.
+
+        Returns a dict with keys: success (bool), message (str), course (str).
+        """
+        token = self._get_bearer_token(page)
+        if not token:
+            return {"success": False, "message": "Could not obtain auth token — is TUMonline reachable?", "course": course_name}
+
+        token_js = json.dumps(token)
+
+        # Step 1: find course ID via search
+        courses = self.search_registrable_courses(page, course_name)
+        matched = next(
+            (c for c in courses if course_name.lower() in c["title"].lower()),
+            courses[0] if courses else None,
+        )
+
+        if matched and matched.get("id"):
+            course_id = matched["id"]
+            # Step 2: POST to registration endpoint
+            reg_result = page.evaluate(f"""async () => {{
+                const r = await fetch(
+                    '/tumonline/ee/rest/slc.tm.cp/student/courseRegistration',
+                    {{
+                        method: 'POST',
+                        headers: {{
+                            Accept: 'application/json',
+                            'Content-Type': 'application/json',
+                            Authorization: 'Bearer ' + {token_js}
+                        }},
+                        body: JSON.stringify({{courseId: {json.dumps(course_id)}}})
+                    }}
+                );
+                return {{ok: r.ok, status: r.status, body: r.ok ? await r.json() : await r.text()}};
+            }}""")
+
+            if reg_result.get("ok"):
+                return {
+                    "success": True,
+                    "message": f"Successfully registered for **{matched['title']}**.",
+                    "course": matched["title"],
+                }
+            if reg_result.get("status") == 409:
+                return {
+                    "success": False,
+                    "message": f"Already registered for **{matched['title']}** (conflict 409).",
+                    "course": matched["title"],
+                }
+
+        # Step 3: Playwright UI fallback
+        self._navigate_to_registration_page(page)
+        page.wait_for_timeout(2000)
+
+        # Try to search for the course in the UI
+        try:
+            search_box = page.locator('input[type="search"], input[placeholder*="earch"], input[placeholder*="uche"]').first
+            if search_box.is_visible():
+                search_box.fill(course_name)
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(2000)
+        except Exception:
+            pass
+
+        # Find and click Anmelden button
+        try:
+            anmelden = page.locator('button:has-text("Anmelden"), button:has-text("Register"), button:has-text("Enroll")').first
+            if anmelden.is_visible():
+                anmelden.click()
+                page.wait_for_timeout(2000)
+                # Confirm dialog if any
+                confirm = page.locator('button:has-text("Confirm"), button:has-text("Bestätigen"), button:has-text("OK")').first
+                if confirm.is_visible():
+                    confirm.click()
+                    page.wait_for_timeout(1500)
+                return {
+                    "success": True,
+                    "message": f"Registration button clicked for **{course_name}**. Check TUMonline to confirm.",
+                    "course": course_name,
+                }
+        except Exception as exc:
+            pass
+
+        return {
+            "success": False,
+            "message": (
+                f"Could not register for **{course_name}** automatically. "
+                "Registration periods may be closed or the course wasn't found. "
+                f"Try directly on campus.tum.de"
+            ),
+            "course": course_name,
+        }
+
+    def deregister_course(self, page, course_name: str) -> dict:
+        """Attempt to deregister from an academic course on TUMonline."""
+        token = self._get_bearer_token(page)
+        if not token:
+            return {"success": False, "message": "Could not obtain auth token.", "course": course_name}
+
+        token_js = json.dumps(token)
+
+        # Step 1: find registration ID from myCourses
+        data = page.evaluate(f"""async () => {{
+            const r = await fetch(
+                '/tumonline/ee/rest/slc.tm.cp/student/myCourses?$top=100&$ctx=lang=en',
+                {{headers: {{Accept: 'application/json', Authorization: 'Bearer ' + {token_js}}}}}
+            );
+            return r.ok ? await r.json() : {{}};
+        }}""")
+
+        matched_reg = None
+        for reg in data.get("registrations", []):
+            title = reg.get("course", {}).get("courseTitle", {}).get("value", "")
+            if course_name.lower() in title.lower():
+                matched_reg = reg
+                break
+
+        if matched_reg:
+            reg_id = matched_reg.get("registrationId") or matched_reg.get("id")
+            if reg_id:
+                del_result = page.evaluate(f"""async () => {{
+                    const r = await fetch(
+                        '/tumonline/ee/rest/slc.tm.cp/student/courseRegistration/{json.dumps(str(reg_id))}',
+                        {{
+                            method: 'DELETE',
+                            headers: {{
+                                Accept: 'application/json',
+                                Authorization: 'Bearer ' + {token_js}
+                            }}
+                        }}
+                    );
+                    return {{ok: r.ok, status: r.status}};
+                }}""")
+                if del_result.get("ok") or del_result.get("status") in (200, 204):
+                    return {
+                        "success": True,
+                        "message": f"Successfully deregistered from **{matched_reg.get('course', {}).get('courseTitle', {}).get('value', course_name)}**.",
+                        "course": course_name,
+                    }
+
+        # Playwright UI fallback
+        self._navigate_to_registration_page(page)
+        page.wait_for_timeout(2000)
+        try:
+            abmelden = page.locator('button:has-text("Abmelden"), button:has-text("Deregister"), button:has-text("Drop")').first
+            if abmelden.is_visible():
+                abmelden.click()
+                page.wait_for_timeout(1500)
+                confirm = page.locator('button:has-text("Confirm"), button:has-text("Bestätigen"), button:has-text("OK")').first
+                if confirm.is_visible():
+                    confirm.click()
+                return {
+                    "success": True,
+                    "message": f"Deregistration button clicked for **{course_name}**. Check TUMonline to confirm.",
+                    "course": course_name,
+                }
+        except Exception:
+            pass
+
+        return {
+            "success": False,
+            "message": f"Could not deregister from **{course_name}** — not found in your enrolled courses or deregistration period is closed.",
+            "course": course_name,
+        }
+
+    def scrape_register_course(self, username: str, password: str, course_name: str) -> dict:
+        """Full workflow: login + register for a course."""
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                if not self.login(page, username, password):
+                    return {"success": False, "message": "TUMonline login failed.", "course": course_name}
+                return self.register_course(page, course_name)
+            finally:
+                browser.close()
+
+    def scrape_deregister_course(self, username: str, password: str, course_name: str) -> dict:
+        """Full workflow: login + deregister from a course."""
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                if not self.login(page, username, password):
+                    return {"success": False, "message": "TUMonline login failed.", "course": course_name}
+                return self.deregister_course(page, course_name)
+            finally:
+                browser.close()
+
     def scrape_with_courses(self, username: str, password: str) -> dict:
         """Full scrape: login once, then fetch deadlines AND courses/grades.
 
